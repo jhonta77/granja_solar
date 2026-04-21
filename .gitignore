@@ -1,0 +1,79 @@
+# Entorno local
+venv/
+.venv/
+env/
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Datos crudos, limpios y salidas generadas
+data/raw/
+data/clean/
+data/interim/
+data/outputs/
+outputs/
+
+# Rasters, geodatos y archivos pesados
+data/*.tif
+data/*.tiff
+data/*.zip
+data/*.geojson
+data/*.gpkg
+data/*.shp
+data/*.dbf
+data/*.shx
+data/*.prj
+data/*.cpg
+*.tif
+*.tiff
+*.gpkg
+*.shp
+*.dbf
+*.shx
+*.prj
+*.cpg
+
+# Tablas de datos locales
+*.csv
+*.xlsx
+*.xls
+*.xlsm
+*.parquet
+*.feather
+
+# Figuras y reportes generados
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.html
+
+# Logs y temporales
+*.log
+*.tmp
+*.bak
+*.swp
+~$*
+
+# Sistema operativo / IDE
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# Mantener estructura si se agregan placeholders
+!data/.gitkeep
+!data/raw/.gitkeep
+!data/clean/.gitkeep
+!data/interim/.gitkeep
+!notebooks/.gitkeep
+!src/.gitkeep
