@@ -20,6 +20,7 @@ DEFAULT_CLUSTERS_PATH = (
     PROJECT_ROOT / "data" / "clean" / "clusters_municipios" / "municipios_clusters_kmeans.csv"
 )
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "clean" / "visualizaciones_municipios"
+SCORE_COL = "v_i_modelo_rural"
 
 CORRELATION_COLUMNS = [
     "pvout_kwh_kwp_day",
@@ -34,8 +35,10 @@ CORRELATION_COLUMNS = [
     "g_i_red",
     "p_i_pendiente_proxy",
     "u_i_uso_suelo",
+    "r_i_zona_urbana_pot",
     "score_preliminar_solar_red_pendiente_runap",
-    "v_i_modelo_proxy_xm",
+    SCORE_COL,
+    "score_rural_con_bono_demanda",
 ]
 
 HISTOGRAM_COLUMNS = [
@@ -49,7 +52,9 @@ HISTOGRAM_COLUMNS = [
     "g_i_red",
     "p_i_pendiente_proxy",
     "u_i_uso_suelo",
-    "v_i_modelo_proxy_xm",
+    "r_i_zona_urbana_pot",
+    SCORE_COL,
+    "score_rural_con_bono_demanda",
 ]
 
 LABELS = {
@@ -65,8 +70,10 @@ LABELS = {
     "g_i_red": "G_i red",
     "p_i_pendiente_proxy": "P_i pendiente",
     "u_i_uso_suelo": "U_i uso suelo",
-    "score_preliminar_solar_red_pendiente_runap": "Score sin demanda",
-    "v_i_modelo_proxy_xm": "V_i modelo proxy XM",
+    "r_i_zona_urbana_pot": "R_i zona urbana POT",
+    "score_preliminar_solar_red_pendiente_runap": "Score rural sin demanda",
+    SCORE_COL: "V_i rural",
+    "score_rural_con_bono_demanda": "Score rural con bono demanda",
 }
 
 
@@ -93,10 +100,11 @@ def parse_args() -> argparse.Namespace:
         help="Carpeta de salida para visualizaciones.",
     )
     parser.add_argument(
-        "--include-demand-outliers",
+        "--exclude-demand-outliers",
         action="store_true",
-        help="Incluye municipios marcados como atipicos de demanda en matrices e histogramas.",
+        help="Excluye municipios marcados como atipicos de demanda en matrices e histogramas.",
     )
+    parser.add_argument("--include-demand-outliers", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -135,9 +143,9 @@ def load_municipal_data(input_path: Path, clusters_path: Path) -> pd.DataFrame:
     return df
 
 
-def filter_analysis_rows(df: pd.DataFrame, include_demand_outliers: bool) -> pd.DataFrame:
+def filter_analysis_rows(df: pd.DataFrame, exclude_demand_outliers: bool) -> pd.DataFrame:
     working = df.copy()
-    if not include_demand_outliers and "flag_atipico_eda_demanda" in working.columns:
+    if exclude_demand_outliers and "flag_atipico_eda_demanda" in working.columns:
         flag = pd.to_numeric(working["flag_atipico_eda_demanda"], errors="coerce").fillna(0)
         working = working[flag.ne(1)].copy()
     return working
@@ -293,19 +301,19 @@ def scaled_marker_size(series: pd.Series) -> pd.Series:
 
 
 def export_3d_maps(df: pd.DataFrame, output_dir: Path) -> list[Path]:
-    required = {"lon", "lat", "v_i_modelo_proxy_xm"}
+    required = {"lon", "lat", SCORE_COL}
     if not required.issubset(df.columns):
         return []
 
     paths: list[Path] = []
-    working = df.dropna(subset=["lon", "lat", "v_i_modelo_proxy_xm"]).copy()
+    working = df.dropna(subset=["lon", "lat", SCORE_COL]).copy()
     if working.empty:
         return []
 
-    for column in ["lon", "lat", "v_i_modelo_proxy_xm", "s_i_solar"]:
+    for column in ["lon", "lat", SCORE_COL, "s_i_solar"]:
         if column in working.columns:
             working[column] = pd.to_numeric(working[column], errors="coerce")
-    working = working.dropna(subset=["lon", "lat", "v_i_modelo_proxy_xm"])
+    working = working.dropna(subset=["lon", "lat", SCORE_COL])
 
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection="3d")
@@ -313,16 +321,16 @@ def export_3d_maps(df: pd.DataFrame, output_dir: Path) -> list[Path]:
     scatter = ax.scatter(
         working["lon"],
         working["lat"],
-        working["v_i_modelo_proxy_xm"],
-        c=working["v_i_modelo_proxy_xm"],
+        working[SCORE_COL],
+        c=working[SCORE_COL],
         s=sizes,
         alpha=0.75,
     )
     ax.set_xlabel("Longitud")
     ax.set_ylabel("Latitud")
-    ax.set_zlabel("V_i viabilidad")
-    ax.set_title("Mapa 3D municipal: altura = V_i, tamano = S_i solar")
-    fig.colorbar(scatter, ax=ax, shrink=0.65, pad=0.1, label="V_i")
+    ax.set_zlabel("V_i rural")
+    ax.set_title("Mapa 3D municipal: altura = V_i rural, tamano = S_i solar")
+    fig.colorbar(scatter, ax=ax, shrink=0.65, pad=0.1, label="V_i rural")
     fig.tight_layout()
     path = output_dir / "mapa_3d_viabilidad_todos_municipios.png"
     fig.savefig(path, dpi=180)
@@ -342,15 +350,15 @@ def export_3d_maps(df: pd.DataFrame, output_dir: Path) -> list[Path]:
             scatter = ax.scatter(
                 clustered["lon"],
                 clustered["lat"],
-                clustered["v_i_modelo_proxy_xm"],
+                clustered[SCORE_COL],
                 c=clustered["cluster_kmeans"],
                 s=sizes,
                 alpha=0.8,
             )
             ax.set_xlabel("Longitud")
             ax.set_ylabel("Latitud")
-            ax.set_zlabel("V_i viabilidad")
-            ax.set_title("Mapa 3D municipal: altura = V_i, color = cluster")
+            ax.set_zlabel("V_i rural")
+            ax.set_title("Mapa 3D municipal: altura = V_i rural, color = cluster")
             fig.colorbar(scatter, ax=ax, shrink=0.65, pad=0.1, label="Cluster")
             fig.tight_layout()
             path = output_dir / "mapa_3d_clusters_kmeans.png"
@@ -369,7 +377,7 @@ def write_observations(
     cross_path: Path | None,
     map_paths: list[Path],
     histogram_summary: pd.DataFrame,
-    include_demand_outliers: bool,
+    exclude_demand_outliers: bool,
 ) -> Path:
     observations = [
         "Visualizaciones municipales",
@@ -377,13 +385,14 @@ def write_observations(
         "",
         f"Municipios en tabla base: {len(df)}",
         f"Municipios usados en matrices/histogramas: {len(analysis_df)}",
-        f"Incluye atipicos de demanda: {include_demand_outliers}",
+        f"Excluye atipicos de demanda: {exclude_demand_outliers}",
         "",
         "Advertencias metodologicas:",
         "- La matriz de correlacion mide asociacion lineal entre variables numericas; no prueba causalidad.",
         "- La matriz cluster vs viabilidad es un cruce de categorias, no una matriz de confusion supervisada estricta.",
         "- El mapa 3D es una visualizacion georreferenciada simple en lon/lat; no reemplaza un SIG ni un mapa cartografico oficial.",
         "- El tamano de puntos en el mapa 3D usa S_i solar cuando esta disponible.",
+        "- La demanda se visualiza como contexto; no forma parte del V_i rural.",
         "",
         "Archivos principales:",
         f"- correlacion: {corr_path if corr_path else 'no generada'}",
@@ -402,7 +411,8 @@ def main() -> int:
     dirs = ensure_dirs(args.output_dir)
 
     df = load_municipal_data(args.input, args.clusters)
-    analysis_df = filter_analysis_rows(df, include_demand_outliers=args.include_demand_outliers)
+    exclude_demand_outliers = args.exclude_demand_outliers and not args.include_demand_outliers
+    analysis_df = filter_analysis_rows(df, exclude_demand_outliers=exclude_demand_outliers)
 
     corr_path = export_correlation_matrix(analysis_df, dirs["matrices"])
     cross_path = export_cluster_viability_matrix(analysis_df, dirs["matrices"])
@@ -416,7 +426,7 @@ def main() -> int:
         cross_path,
         map_paths,
         histogram_summary,
-        args.include_demand_outliers,
+        exclude_demand_outliers,
     )
 
     print("Visualizaciones municipales generadas.")

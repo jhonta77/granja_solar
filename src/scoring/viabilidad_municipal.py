@@ -18,19 +18,22 @@ DEFAULT_GRID_DISTANCE_PATH = (
 DEFAULT_RUNAP_PATH = (
     PROJECT_ROOT / "data" / "clean" / "runap_protegidas" / "runap_restricciones_municipios.csv"
 )
+DEFAULT_POT_PATH = (
+    PROJECT_ROOT / "data" / "clean" / "usos_suelo_pot" / "usos_pot_puntos_extraidos.csv"
+)
 DEFAULT_DEMAND_PATH = (
     PROJECT_ROOT / "data" / "clean" / "xm_demanda_municipal" / "xm_demanda_municipal_proxy.csv"
 )
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "clean" / "viabilidad_municipal"
 
 
-OFFICIAL_WEIGHTS = {
-    "w_s": 0.30,
-    "w_d": 0.15,
-    "w_g": 0.25,
-    "w_p": 0.20,
+RURAL_WEIGHTS = {
+    "w_s": 0.35,
+    "w_g": 0.30,
+    "w_p": 0.25,
     "w_u": 0.10,
 }
+DEMAND_BONUS_WEIGHT = 0.05
 
 PRELIMINARY_DISTANCE_LIMIT_KM = 50.0
 
@@ -84,8 +87,16 @@ def load_inputs(
     slope_path: Path,
     grid_distance_path: Path | None,
     runap_path: Path | None,
+    pot_path: Path | None,
     demand_path: Path | None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None]:
+) -> tuple[
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame | None,
+    pd.DataFrame | None,
+    pd.DataFrame | None,
+    pd.DataFrame | None,
+]:
     """Carga fuentes municipales ya limpias."""
 
     if not pvout_path.exists():
@@ -114,13 +125,32 @@ def load_inputs(
             raise ValueError("Restricciones RUNAP no tiene columna codigo_dane.")
         runap["codigo_dane"] = runap["codigo_dane"].astype("string").str.zfill(5)
 
+    pot = None
+    if pot_path is not None and pot_path.exists():
+        pot = pd.read_csv(pot_path, dtype={"codigo_dane": "string"})
+        if "codigo_dane" not in pot.columns:
+            raise ValueError("Usos POT no tiene columna codigo_dane.")
+        pot["codigo_dane"] = pot["codigo_dane"].astype("string").str.zfill(5)
+        if "tipo_capa_pot" in pot.columns:
+            layer_priority = pot["tipo_capa_pot"].astype("string").str.lower().map(
+                {"urbana": 0, "rural": 1}
+            )
+            pot = (
+                pot.assign(_prioridad_capa_pot=layer_priority.fillna(2))
+                .sort_values(["codigo_dane", "_prioridad_capa_pot"])
+                .drop_duplicates(subset=["codigo_dane"], keep="first")
+                .drop(columns=["_prioridad_capa_pot"])
+            )
+        else:
+            pot = pot.drop_duplicates(subset=["codigo_dane"], keep="last")
+
     demand = None
     if demand_path is not None and demand_path.exists():
         demand = pd.read_csv(demand_path, dtype={"codigo_dane": "string"})
         if "codigo_dane" not in demand.columns:
             raise ValueError("Demanda XM municipal no tiene columna codigo_dane.")
         demand["codigo_dane"] = demand["codigo_dane"].astype("string").str.zfill(5)
-    return pvout, slope, grid_distance, runap, demand
+    return pvout, slope, grid_distance, runap, pot, demand
 
 
 def build_preliminary_score(
@@ -128,6 +158,7 @@ def build_preliminary_score(
     slope: pd.DataFrame,
     grid_distance: pd.DataFrame | None,
     runap: pd.DataFrame | None,
+    pot: pd.DataFrame | None,
     demand: pd.DataFrame | None,
     distance_limit_km: float = PRELIMINARY_DISTANCE_LIMIT_KM,
 ) -> pd.DataFrame:
@@ -209,6 +240,39 @@ def build_preliminary_score(
         result["u_i_no_protegido_runap"] = pd.NA
         result["r_i_runap"] = pd.NA
 
+    if pot is not None:
+        pot_columns = [
+            "codigo_dane",
+            "layer_id_pot",
+            "layer_name_pot",
+            "tipo_capa_pot",
+            "uso_pot",
+            "tipo_uso_pot",
+            "observacion_pot",
+            "categoria_aptitud_pot",
+            "u_i_uso_suelo_proxy",
+            "apto_doble_uso_pastoreo",
+            "restriccion_territorial_proxy",
+            "criterio_clasificacion",
+            "pot_identify_ok",
+            "pot_mensaje",
+            "municipio_pot",
+        ]
+        available_pot = [column for column in pot_columns if column in pot.columns]
+        result = result.merge(
+            pot[available_pot],
+            on="codigo_dane",
+            how="left",
+            validate="one_to_one",
+        )
+    else:
+        result["tipo_capa_pot"] = pd.NA
+        result["categoria_aptitud_pot"] = pd.NA
+        result["u_i_uso_suelo_proxy"] = pd.NA
+        result["restriccion_territorial_proxy"] = pd.NA
+        result["pot_identify_ok"] = pd.NA
+        result["pot_mensaje"] = "POT municipal no disponible; no se puede excluir zona urbana por capa."
+
     if demand is not None:
         demand_columns = [
             "codigo_dane",
@@ -241,12 +305,22 @@ def build_preliminary_score(
     result["s_i_solar"] = minmax_score(result["pvout_kwh_kwp_day"], higher_is_better=True)
     result["p_i_pendiente_proxy"] = pd.to_numeric(result["score_pendiente"], errors="coerce")
     result["g_i_red"] = minmax_score(result["dist_subestacion_km"], higher_is_better=False)
-    result["u_i_uso_suelo"] = pd.to_numeric(result["u_i_no_protegido_runap"], errors="coerce")
+    result["u_i_no_protegido_runap"] = pd.to_numeric(result["u_i_no_protegido_runap"], errors="coerce")
+    result["u_i_pot_compatible"] = pd.to_numeric(result["u_i_uso_suelo_proxy"], errors="coerce")
+    result["u_i_uso_suelo"] = result["u_i_no_protegido_runap"]
+    has_pot_score = result["u_i_pot_compatible"].notna()
+    result.loc[has_pot_score, "u_i_uso_suelo"] = pd.concat(
+        [
+            result.loc[has_pot_score, "u_i_no_protegido_runap"],
+            result.loc[has_pot_score, "u_i_pot_compatible"],
+        ],
+        axis=1,
+    ).min(axis=1, skipna=True)
     result["d_i_demanda"] = pd.to_numeric(result["d_i_demanda"], errors="coerce")
 
     # Restriccion preliminar: usa la pendiente puntual disponible y distancia
-    # maxima a subestacion de alta tension mas RUNAP. La restriccion oficial
-    # debe recalcularse con area apta municipal, lineas, capacidad y permisos.
+    # maxima a subestacion de alta tension mas RUNAP/POT. La restriccion oficial
+    # debe recalcularse con area rural apta municipal, lineas, capacidad y permisos.
     slope_restriction = result["viabilidad_pendiente"].map(
         {
             "viable": 1.0,
@@ -264,17 +338,29 @@ def build_preliminary_score(
     runap_restriction = pd.Series(1.0, index=result.index)
     if "r_i_runap" in result.columns:
         runap_restriction = pd.to_numeric(result["r_i_runap"], errors="coerce").fillna(1.0)
+    urban_zone = result["tipo_capa_pot"].astype("string").str.lower().eq("urbana")
+    result["r_i_zona_urbana_pot"] = pd.Series(1.0, index=result.index)
+    result.loc[urban_zone, "r_i_zona_urbana_pot"] = 0.0
+    pot_territorial_restriction = pd.Series(1.0, index=result.index)
+    if "restriccion_territorial_proxy" in result.columns:
+        pot_restricted = pd.to_numeric(
+            result["restriccion_territorial_proxy"], errors="coerce"
+        ).fillna(0.0).eq(1)
+        pot_territorial_restriction = (~pot_restricted).astype(float)
+    result["r_i_restriccion_pot"] = pot_territorial_restriction
     result["r_i_preliminar"] = (
         pd.to_numeric(slope_restriction, errors="coerce").fillna(0.0)
         * distance_restriction
         * runap_restriction
+        * result["r_i_zona_urbana_pot"]
+        * result["r_i_restriccion_pot"]
     )
 
     available_terms = [
-        ("s_i_solar", OFFICIAL_WEIGHTS["w_s"]),
-        ("p_i_pendiente_proxy", OFFICIAL_WEIGHTS["w_p"]),
-        ("g_i_red", OFFICIAL_WEIGHTS["w_g"]),
-        ("u_i_uso_suelo", OFFICIAL_WEIGHTS["w_u"]),
+        ("s_i_solar", RURAL_WEIGHTS["w_s"]),
+        ("p_i_pendiente_proxy", RURAL_WEIGHTS["w_p"]),
+        ("g_i_red", RURAL_WEIGHTS["w_g"]),
+        ("u_i_uso_suelo", RURAL_WEIGHTS["w_u"]),
     ]
     usable_terms = [
         (column, weight)
@@ -283,56 +369,57 @@ def build_preliminary_score(
     ]
     available_weight_sum = sum(weight for _, weight in usable_terms)
     weighted_sum = sum(pd.to_numeric(result[column], errors="coerce").fillna(0.0) * weight for column, weight in usable_terms)
-    result["score_preliminar_solar_red_pendiente_runap"] = result["r_i_preliminar"] * (
+    result["v_i_modelo_rural"] = result["r_i_preliminar"] * (
         weighted_sum / available_weight_sum
     )
-
-    full_components = [
-        "s_i_solar",
-        "d_i_demanda",
-        "g_i_red",
-        "p_i_pendiente_proxy",
-        "u_i_uso_suelo",
-    ]
-    has_full_components = result[full_components].notna().all(axis=1)
-    result["v_i_modelo_proxy_xm"] = pd.NA
-    result.loc[has_full_components, "v_i_modelo_proxy_xm"] = result.loc[
-        has_full_components, "r_i_preliminar"
-    ] * (
-        OFFICIAL_WEIGHTS["w_s"] * result.loc[has_full_components, "s_i_solar"]
-        + OFFICIAL_WEIGHTS["w_d"] * result.loc[has_full_components, "d_i_demanda"]
-        + OFFICIAL_WEIGHTS["w_g"] * result.loc[has_full_components, "g_i_red"]
-        + OFFICIAL_WEIGHTS["w_p"] * result.loc[has_full_components, "p_i_pendiente_proxy"]
-        + OFFICIAL_WEIGHTS["w_u"] * result.loc[has_full_components, "u_i_uso_suelo"]
+    result["score_preliminar_solar_red_pendiente_runap"] = result["v_i_modelo_rural"]
+    result["bono_demanda_favorable"] = (
+        result["r_i_preliminar"]
+        * pd.to_numeric(result["d_i_demanda"], errors="coerce").fillna(0.0)
+        * DEMAND_BONUS_WEIGHT
     )
+    result["score_rural_con_bono_demanda"] = (
+        result["v_i_modelo_rural"] + result["bono_demanda_favorable"]
+    ).clip(upper=1.0)
+
+    result["v_i_modelo_proxy_xm"] = result["v_i_modelo_rural"]
     result["clasificacion_preliminar"] = classify_percentile(
-        result["v_i_modelo_proxy_xm"]
+        result["v_i_modelo_rural"]
     )
 
-    result["v_i_modelo_oficial"] = result["v_i_modelo_proxy_xm"]
+    result["v_i_modelo_oficial"] = result["v_i_modelo_rural"]
     result["estado_modelo_oficial"] = (
-        "modelo_proxy_xm: demanda asignada por subarea XM; revisar flags de demanda y limitaciones RUNAP/POT"
+        "modelo_rural_sin_demanda: demanda XM solo se reporta como factor favorable no determinante"
+    )
+    missing_pot = result["tipo_capa_pot"].isna()
+    if "pot_mensaje" in result.columns:
+        result.loc[missing_pot, "pot_mensaje"] = result.loc[missing_pot, "pot_mensaje"].fillna(
+            "Sin muestreo POT para el municipio; no se puede descartar zona urbana."
+        )
+    result.loc[missing_pot, "estado_modelo_oficial"] = (
+        "modelo_rural_sin_demanda_con_pot_pendiente: no hay capa POT municipal para descartar zona urbana"
+    )
+    result.loc[urban_zone, "estado_modelo_oficial"] = "excluido_zona_urbana_pot"
+    result.loc[result["r_i_restriccion_pot"].eq(0), "estado_modelo_oficial"] = (
+        "excluido_restriccion_territorial_pot"
     )
     result.loc[result.get("flag_revision_demanda", 0).eq(1), "estado_modelo_oficial"] = (
-        "modelo_proxy_xm_con_demanda_en_revision"
-    )
-    result.loc[result["d_i_demanda"].isna(), "estado_modelo_oficial"] = (
-        "sin_v_i: no hay demanda XM asignada al municipio"
+        result["estado_modelo_oficial"] + "; demanda_en_revision_no_usada_en_v_i"
     )
     result["notas_metodologicas"] = (
         "Score preliminar usa PVOUT puntual municipal, distancia a subestacion UPME "
-        "clase de pendiente IGAC en punto interno, proporcion no protegida RUNAP y demanda XM pron_areas "
-        "asignada por proxy regional/departamental."
+        "clase de pendiente IGAC en punto interno, proporcion no protegida RUNAP y POT si existe. "
+        "La demanda XM pron_areas no entra al V_i rural; se reporta como bono/contexto favorable."
     )
 
     sort_columns = [
-        "v_i_modelo_proxy_xm",
+        "v_i_modelo_rural",
         "score_preliminar_solar_red_pendiente_runap",
         "s_i_solar",
-        "d_i_demanda",
         "g_i_red",
         "p_i_pendiente_proxy",
         "u_i_uso_suelo",
+        "d_i_demanda",
     ]
     return result.sort_values(sort_columns, ascending=False, na_position="last")
 
@@ -346,28 +433,31 @@ def write_observations(output_path: Path, scored: pd.DataFrame) -> None:
         "Viabilidad municipal preliminar",
         "================================",
         "",
-        "Formula oficial del proyecto:",
-        "V_i = R_i(0.30*S_i + 0.15*D_i + 0.25*G_i + 0.20*P_i + 0.10*U_i)",
+        "Formula rural del proyecto:",
+        "V_i = R_i(0.35*S_i + 0.30*G_i + 0.25*P_i + 0.10*U_i)",
         "",
         "Estado actual:",
         "- S_i solar: disponible con PVOUT municipal puntual.",
         "- P_i pendiente: disponible como proxy puntual IGAC, no como proporcion de area apta.",
         "- G_i red: disponible como distancia minima a subestacion UPME en servicio de nivel 4/5.",
-        "- U_i uso del suelo/restriccion: disponible parcialmente como proporcion no protegida RUNAP.",
-        "- D_i demanda: disponible como proxy municipal desde subareas XM pron_areas.",
-        "- V_i oficial: se exporta como v_i_modelo_proxy_xm porque D_i no es demanda municipal directa.",
+        "- U_i uso del suelo/restriccion: combina proporcion no protegida RUNAP y POT cuando existe.",
+        "- Zonas urbanas POT: si el punto municipal cae en capa urbana, R_i = 0.",
+        "- D_i demanda: disponible como proxy municipal desde subareas XM pron_areas, pero no entra al V_i rural.",
+        "- V_i oficial: se exporta como v_i_modelo_rural; v_i_modelo_proxy_xm queda como alias compatible.",
         "",
         "Score principal exportado:",
-        "v_i_modelo_proxy_xm = R_preliminar * (0.30*S_i + 0.15*D_i + 0.25*G_i + 0.20*P_i + 0.10*U_i)",
+        "v_i_modelo_rural = R_preliminar * (0.35*S_i + 0.30*G_i + 0.25*P_i + 0.10*U_i)",
         "",
-        "Score auxiliar sin demanda:",
-        "score_preliminar_solar_red_pendiente_runap = R_preliminar * ((0.30*S_i + 0.25*G_i + 0.20*P_i + 0.10*U_i) / 0.85)",
+        "Demanda como factor favorable no determinante:",
+        f"score_rural_con_bono_demanda = v_i_modelo_rural + ({DEMAND_BONUS_WEIGHT:.2f} * D_i * R_i)",
         "",
         "Restriccion preliminar:",
         "- R_preliminar = 1 si la clase IGAC es viable o condicional.",
         "- R_preliminar = 0 si la clase IGAC es no_viable o desconocida.",
         f"- R_preliminar = 0 si distancia a subestacion > {PRELIMINARY_DISTANCE_LIMIT_KM:.0f} km.",
         "- R_preliminar = 0 si RUNAP cubre al menos 80% del municipio.",
+        "- R_preliminar = 0 si POT indica capa urbana en el punto municipal.",
+        "- R_preliminar = 0 si POT indica restriccion territorial estricta.",
         "",
         "Conteo por clasificacion preliminar:",
     ]
@@ -385,6 +475,16 @@ def write_observations(output_path: Path, scored: pd.DataFrame) -> None:
         lines.append(
             f"- Municipios con flag_atipico_eda_demanda=1: {int(scored['flag_atipico_eda_demanda'].fillna(0).eq(1).sum())}"
         )
+        lines.append("- Estos flags no excluyen municipios del V_i rural; solo documentan incertidumbre de demanda.")
+        lines.append("")
+    if "tipo_capa_pot" in scored.columns:
+        lines.append("Conteo por capa POT muestreada:")
+        pot_counts = scored["tipo_capa_pot"].fillna("sin_pot_muestreado").value_counts(dropna=False)
+        for label, count in pot_counts.items():
+            lines.append(f"- {label}: {count}")
+        lines.append(
+            f"- Municipios excluidos por capa urbana POT: {int(scored['r_i_zona_urbana_pot'].eq(0).sum())}"
+        )
         lines.append("")
     lines.append("Conteo por pendiente IGAC:")
     for label, count in slope_counts.items():
@@ -398,8 +498,9 @@ def write_observations(output_path: Path, scored: pd.DataFrame) -> None:
             "- La pendiente se muestrea en un punto interno; el modelo final debe usar proporcion de area apta.",
             "- La distancia a red es euclidiana a subestacion; no incluye lineas, servidumbres ni capacidad disponible real.",
             "- RUNAP cubre areas protegidas registradas; no reemplaza uso/cobertura completa del suelo ni licenciamiento ambiental.",
-            "- La demanda XM usada es proxy regional/subarea; los flags permiten excluir casos ambiguos en analisis de sensibilidad.",
-            "- El uso del suelo compatible con pastoreo sigue pendiente de una capa de cobertura/uso por area o de POT robusto por poligono.",
+            "- La demanda XM usada es proxy regional/subarea; se conserva como contexto favorable, no como criterio determinante.",
+            "- La exclusion urbana POT actual depende de muestreo puntual si no existe interseccion poligonal completa.",
+            "- Para quitar zonas urbanas dentro de cada municipio de forma robusta se necesita area rural apta por poligono o buffer a casco urbano.",
         ]
     )
     output_path.write_text("\n".join(lines), encoding="utf-8")
@@ -410,6 +511,7 @@ def run_scoring(
     slope_path: Path = DEFAULT_SLOPE_PATH,
     grid_distance_path: Path | None = DEFAULT_GRID_DISTANCE_PATH,
     runap_path: Path | None = DEFAULT_RUNAP_PATH,
+    pot_path: Path | None = DEFAULT_POT_PATH,
     demand_path: Path | None = DEFAULT_DEMAND_PATH,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     top_n: int = 10,
@@ -418,11 +520,12 @@ def run_scoring(
     """Ejecuta scoring preliminar municipal."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    pvout, slope, grid_distance, runap, demand = load_inputs(
+    pvout, slope, grid_distance, runap, pot, demand = load_inputs(
         pvout_path,
         slope_path,
         grid_distance_path,
         runap_path,
+        pot_path,
         demand_path,
     )
     scored = build_preliminary_score(
@@ -430,28 +533,30 @@ def run_scoring(
         slope,
         grid_distance,
         runap,
+        pot,
         demand,
         distance_limit_km=distance_limit_km,
     )
 
     scored_path = output_dir / "viabilidad_municipal_preliminar.csv"
-    top_path = output_dir / f"top{top_n}_modelo_proxy_xm_etiquetado.csv"
-    top_clean_path = output_dir / f"top{top_n}_modelo_proxy_xm_sin_atipicos_demanda.csv"
+    top_path = output_dir / f"top{top_n}_modelo_rural_sin_demanda.csv"
+    top_bonus_path = output_dir / f"top{top_n}_sensibilidad_demanda_favorable.csv"
     observations_path = output_dir / "observaciones_viabilidad_municipal.txt"
 
     scored.to_csv(scored_path, index=False, encoding="utf-8-sig")
     scored.head(top_n).to_csv(top_path, index=False, encoding="utf-8-sig")
-    clean_mask = (
-        scored["v_i_modelo_proxy_xm"].notna()
-        & scored["flag_atipico_eda_demanda"].fillna(1).eq(0)
+    (
+        scored.dropna(subset=["score_rural_con_bono_demanda"])
+        .sort_values("score_rural_con_bono_demanda", ascending=False)
+        .head(top_n)
+        .to_csv(top_bonus_path, index=False, encoding="utf-8-sig")
     )
-    scored[clean_mask].head(top_n).to_csv(top_clean_path, index=False, encoding="utf-8-sig")
     write_observations(observations_path, scored)
 
     return {
         "scored": scored_path,
         "top": top_path,
-        "top_sin_atipicos_demanda": top_clean_path,
+        "top_sensibilidad_demanda": top_bonus_path,
         "observations": observations_path,
     }
 
@@ -464,6 +569,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--slope-path", type=Path, default=DEFAULT_SLOPE_PATH)
     parser.add_argument("--grid-distance-path", type=Path, default=DEFAULT_GRID_DISTANCE_PATH)
     parser.add_argument("--runap-path", type=Path, default=DEFAULT_RUNAP_PATH)
+    parser.add_argument("--pot-path", type=Path, default=DEFAULT_POT_PATH)
     parser.add_argument("--demand-path", type=Path, default=DEFAULT_DEMAND_PATH)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--top-n", type=int, default=10)
@@ -478,6 +584,7 @@ def main() -> int:
         slope_path=args.slope_path,
         grid_distance_path=args.grid_distance_path,
         runap_path=args.runap_path,
+        pot_path=args.pot_path,
         demand_path=args.demand_path,
         output_dir=args.output_dir,
         top_n=args.top_n,
@@ -486,7 +593,7 @@ def main() -> int:
     print("Score municipal preliminar generado.")
     for name, path in outputs.items():
         print(f"- {name}: {path}")
-    print("Advertencia: V_i se calcula como proxy XM; revise flags de demanda antes de sustentar resultados.")
+    print("Advertencia: V_i rural no usa demanda; POT urbano solo se excluye si existe capa municipal muestreada.")
     return 0
 
 

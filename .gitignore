@@ -4,6 +4,7 @@ venv/
 env/
 .env
 .env.*
+!.env.mysql.example
 
 # Python
 __pycache__/

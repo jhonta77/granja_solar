@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from notebooks.eda_utils import (  # noqa: E402
+from src.scoring.xm_file_utils import (  # noqa: E402
     extract_xm_source_type,
     read_xm_txt_file,
     slugify,

@@ -240,6 +240,14 @@ def classify_pot_use(label: Any, layer_id: int | None = None) -> dict[str, Any]:
             "criterio_clasificacion": "Uso forestal; puede ser productivo o protector. Requiere revision antes de usarlo como apto.",
         }
     if any(term in text for term in incompatible_terms) or layer_id == URBAN_LAYER_ID:
+        if layer_id == URBAN_LAYER_ID:
+            return {
+                "categoria_aptitud_pot": "zona_urbana_excluida",
+                "u_i_uso_suelo_proxy": 0.0,
+                "apto_doble_uso_pastoreo": 0.0,
+                "restriccion_territorial_proxy": 1,
+                "criterio_clasificacion": "Capa POT urbana; se excluye para granja solar rural.",
+            }
         return {
             "categoria_aptitud_pot": "no_preferente",
             "u_i_uso_suelo_proxy": 0.2,
@@ -407,8 +415,8 @@ def sample_points(
                 for raw in raw_results:
                     record = result_to_record(raw)
                     code = str(record.get("codigo_dane", "")).zfill(5)
-                    # Se prioriza capa rural para U_i; si no hay rural, se conserva urbana.
-                    if code not in records_by_code or record.get("layer_id_pot") == RURAL_LAYER_ID:
+                    # Una lectura urbana es restriccion dura para granja solar rural.
+                    if code not in records_by_code or record.get("layer_id_pot") == URBAN_LAYER_ID:
                         records_by_code[code] = record
             except Exception as error:  # noqa: BLE001
                 print(f"Advertencia POT lote {start}: {error}")
@@ -483,7 +491,8 @@ def write_observations(
         "- Para granja solar rural, se priorizan etiquetas agropecuarias, pecuarias, ganaderas, pastos y sistemas pastoriles.",
         "- Etiquetas de proteccion estricta, reserva, amenaza o recursos naturales se tratan como restriccion proxy.",
         "- Etiquetas mixtas agro/pastoreo con condicion ambiental se tratan como condicionales, no como aptas automaticas.",
-        "- Etiquetas urbanas, industriales, mineras o residenciales se tratan como no preferentes.",
+        "- La capa urbana POT se trata como exclusion para granja solar rural.",
+        "- Etiquetas industriales, mineras o residenciales en capa no urbana se tratan como no preferentes.",
         "",
         "Limitacion critica:",
         "- U_i oficial deberia calcularse como area compatible / area total municipal mediante interseccion poligonal.",
