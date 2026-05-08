@@ -595,13 +595,34 @@ def build_simem() -> dict[str, pd.DataFrame]:
     return result
 
 
+def _valid_dane_codes() -> set[str]:
+    """Retorna el conjunto de codigo_dane que existen en municipios_distritos_colombia.csv."""
+    path = DATA_CLEAN_DIR / "base_municipios" / "municipios_distritos_colombia.csv"
+    if not path.exists():
+        return set()
+    df = read_csv(path, string_columns=["codigo_dane"])
+    return set(ensure_string_code(df["codigo_dane"]))
+
+
+def _filter_valid(df: pd.DataFrame) -> pd.DataFrame:
+    """Elimina filas cuyo codigo_dane no existe en la tabla municipios."""
+    valid = _valid_dane_codes()
+    if not valid:
+        return df
+    mask = df["codigo_dane"].isin(valid)
+    dropped = (~mask).sum()
+    if dropped:
+        print(f"  Filtrados {dropped} registros sin codigo_dane en municipios")
+    return df[mask].copy()
+
+
 def build_nasa_municipios() -> pd.DataFrame | None:
     path = DATA_CLEAN_DIR / "nasa_power" / "nasa_power_resumen_municipios.csv"
     if not path.exists():
         return None
     df = read_csv(path, string_columns=["codigo_dane"])
     df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
-    return df
+    return _filter_valid(df)
 
 
 def build_upra_tierra() -> pd.DataFrame | None:
@@ -610,7 +631,7 @@ def build_upra_tierra() -> pd.DataFrame | None:
         return None
     df = read_csv(path, string_columns=["codigo_dane"])
     df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
-    return df
+    return _filter_valid(df)
 
 
 def build_upra_agropecuario() -> pd.DataFrame | None:
@@ -619,7 +640,7 @@ def build_upra_agropecuario() -> pd.DataFrame | None:
         return None
     df = read_csv(path, string_columns=["codigo_dane"])
     df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
-    return df
+    return _filter_valid(df)
 
 
 def build_invias_vias() -> pd.DataFrame | None:
@@ -628,7 +649,7 @@ def build_invias_vias() -> pd.DataFrame | None:
         return None
     df = read_csv(path, string_columns=["codigo_dane"])
     df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
-    return df
+    return _filter_valid(df)
 
 
 def build_ideam_riesgo() -> pd.DataFrame | None:
@@ -637,7 +658,7 @@ def build_ideam_riesgo() -> pd.DataFrame | None:
         return None
     df = read_csv(path, string_columns=["codigo_dane"])
     df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
-    return df
+    return _filter_valid(df)
 
 
 def build_sui_agua() -> pd.DataFrame | None:
@@ -646,7 +667,7 @@ def build_sui_agua() -> pd.DataFrame | None:
         return None
     df = read_csv(path, string_columns=["codigo_dane"])
     df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
-    return df
+    return _filter_valid(df)
 
 
 def build_imrc_dnp() -> pd.DataFrame | None:
@@ -655,7 +676,7 @@ def build_imrc_dnp() -> pd.DataFrame | None:
         return None
     df = read_csv(path, string_columns=["codigo_dane"])
     df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
-    return df
+    return _filter_valid(df)
 
 
 def build_sui_aseo() -> pd.DataFrame | None:
@@ -664,7 +685,7 @@ def build_sui_aseo() -> pd.DataFrame | None:
         return None
     df = read_csv(path, string_columns=["codigo_dane"])
     df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
-    return df
+    return _filter_valid(df)
 
 
 def build_ideam_bart() -> pd.DataFrame | None:
@@ -673,7 +694,7 @@ def build_ideam_bart() -> pd.DataFrame | None:
         return None
     df = read_csv(path, string_columns=["codigo_dane"])
     df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
-    return df
+    return _filter_valid(df)
 
 
 def build_era5() -> pd.DataFrame | None:
@@ -682,7 +703,7 @@ def build_era5() -> pd.DataFrame | None:
         return None
     df = read_csv(path, string_columns=["codigo_dane"])
     df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
-    return df
+    return _filter_valid(df)
 
 
 def build_upra_conflicto() -> pd.DataFrame | None:
@@ -691,7 +712,7 @@ def build_upra_conflicto() -> pd.DataFrame | None:
         return None
     df = read_csv(path, string_columns=["codigo_dane"])
     df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
-    return df
+    return _filter_valid(df)
 
 
 def build_viabilidad_multidimensional() -> pd.DataFrame | None:
@@ -708,7 +729,7 @@ def build_viabilidad_multidimensional() -> pd.DataFrame | None:
         "dims_disponibles", "dims_faltantes",
     ]
     available = [c for c in dim_cols if c in df.columns]
-    return df[available].copy()
+    return _filter_valid(df[available].copy())
 
 
 def build_viabilidad_and_clusters() -> dict[str, pd.DataFrame]:
@@ -760,7 +781,7 @@ def build_tables() -> list[TableSpec]:
     upra_conflicto = build_upra_conflicto()
     viabilidad_multidim = build_viabilidad_multidimensional()
 
-    return [
+    tables = [
         TableSpec(
             name="departamentos",
             df=departments,
