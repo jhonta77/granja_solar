@@ -1003,6 +1003,112 @@ def make_component_heatmap(top: pd.DataFrame) -> plt.Figure:
     return fig
 
 
+_DIM_LABELS = {
+    "score_fisico":       "Fisico\n(solar/viento)",
+    "score_electrico":    "Electrico\n(red/subestacion)",
+    "score_economico":    "Economico\n(tierra/costos)",
+    "score_agropecuario": "Agropecuario\n(UGG/uso suelo)",
+    "score_riesgo":       "Riesgo\n(inundacion/sequia)",
+}
+_DIM_WEIGHTS = {
+    "score_fisico": 0.30,
+    "score_electrico": 0.25,
+    "score_economico": 0.20,
+    "score_agropecuario": 0.15,
+    "score_riesgo": 0.10,
+}
+_TOP5_COLORS = ["#2563EB", "#16A34A", "#D97706", "#DC2626", "#7C3AED"]
+
+
+def make_top5_individual_charts(top5: pd.DataFrame) -> plt.Figure:
+    """Una barra por municipio (5 subplots) mostrando score total vs maximo posible."""
+    n = min(5, len(top5))
+    data = top5.head(n).reset_index(drop=True)
+    fig, axes = plt.subplots(1, n, figsize=scaled_figsize(3.2 * n, 3.5), dpi=FIGURE_DPI)
+    if n == 1:
+        axes = [axes]
+    for i, ax in enumerate(axes):
+        row = data.iloc[i]
+        score = float(row.get("v_i_multidimensional", row.get(SCORE_COL, 0)) or 0)
+        color = _TOP5_COLORS[i]
+        label = f"#{i+1}"
+        ax.bar([label], [score], color=color, width=0.5, zorder=3)
+        ax.bar([label], [1 - score], bottom=[score], color="#E5E7EB", width=0.5, zorder=2)
+        ax.set_ylim(0, 1)
+        ax.set_yticks([0, 0.25, 0.5, 0.75, 1.0])
+        ax.set_yticklabels(["0", ".25", ".50", ".75", "1"] if i == 0 else [])
+        ax.set_title(
+            f"#{i+1}\n{row['municipio']}\n{row['departamento']}",
+            fontsize=8.5,
+            fontweight="bold" if i == 0 else "normal",
+        )
+        ax.text(
+            0, score + 0.02, f"{score:.3f}",
+            ha="center", va="bottom", fontsize=10, fontweight="bold", color=color,
+        )
+        ax.grid(axis="y", linestyle="--", alpha=0.4, zorder=1)
+        ax.set_xlabel("Score total")
+    fig.suptitle("Top 5 municipios - Score multidimensional", fontsize=11, fontweight="bold", y=1.02)
+    fig.tight_layout()
+    return fig
+
+
+def make_numero1_radar(row: pd.Series) -> plt.Figure:
+    """Radar (spider) chart con los 5 scores discriminados del municipio #1."""
+    import numpy as np
+
+    dims = list(_DIM_LABELS.keys())
+    labels = list(_DIM_LABELS.values())
+    weights = [_DIM_WEIGHTS[d] for d in dims]
+    values = [float(row.get(d, 0) or 0) for d in dims]
+
+    N = len(dims)
+    angles = np.linspace(0, 2 * np.pi, N, endpoint=False).tolist()
+    values_plot = values + [values[0]]
+    angles_plot = angles + [angles[0]]
+
+    fig, ax = plt.subplots(figsize=scaled_figsize(6, 6), dpi=FIGURE_DPI, subplot_kw={"polar": True})
+
+    # Area del score real
+    ax.fill(angles_plot[:-1], values_plot[:-1], color=_TOP5_COLORS[0], alpha=0.25)
+    ax.plot(angles_plot, values_plot, color=_TOP5_COLORS[0], linewidth=2, marker="o", markersize=7)
+
+    # Referencia: score maximo (1.0)
+    ax.plot(angles + [angles[0]], [1.0] * (N + 1), color="#9CA3AF", linewidth=1, linestyle="--", alpha=0.6)
+
+    # Etiquetas de dimensiones con peso
+    ax.set_xticks(angles)
+    ax.set_xticklabels(
+        [f"{lbl}\n(w={w:.0%})" for lbl, w in zip(labels, weights)],
+        size=8,
+    )
+    ax.set_ylim(0, 1)
+    ax.set_yticks([0.25, 0.50, 0.75, 1.0])
+    ax.set_yticklabels(["0.25", "0.50", "0.75", "1.0"], size=7, color="#6B7280")
+
+    # Score total
+    score_total = float(row.get("v_i_multidimensional", row.get(SCORE_COL, 0)) or 0)
+    municipio = str(row.get("municipio", ""))
+    depto = str(row.get("departamento", ""))
+    ax.set_title(
+        f"#1 - {municipio} ({depto})\nScore total: {score_total:.4f}",
+        fontsize=11, fontweight="bold", pad=20,
+    )
+
+    # Anotar valores en cada punta
+    for angle, val, dim in zip(angles, values, dims):
+        ax.annotate(
+            f"{val:.3f}",
+            xy=(angle, val),
+            xytext=(angle, val + 0.08),
+            ha="center", va="center",
+            fontsize=8, color=_TOP5_COLORS[0], fontweight="bold",
+        )
+
+    fig.tight_layout()
+    return fig
+
+
 def make_scatter_solar_grid(df: pd.DataFrame) -> plt.Figure:
     plot = df.dropna(subset=["pvout_kwh_kwp_day", "dist_subestacion_km", SCORE_COL]).copy()
     fig, ax = plt.subplots(figsize=scaled_figsize(9, 5), dpi=FIGURE_DPI)
@@ -1690,6 +1796,49 @@ def main() -> None:
     with tab_top:
         st.subheader(f"Top {len(top)} municipios mas probables")
         render_chart(make_top_score_chart(top))
+
+        # --- Top 5 graficas individuales + radar #1 ---
+        multidim_path = PROJECT_ROOT / "data" / "clean" / "viabilidad_municipal" / "viabilidad_municipal_multidimensional.csv"
+        if multidim_path.exists():
+            dim_df = pd.read_csv(multidim_path, dtype={"codigo_dane": "string"})
+            dim_top5 = (
+                dim_df
+                .sort_values("v_i_multidimensional", ascending=False)
+                .head(5)
+                .reset_index(drop=True)
+            )
+            if not dim_top5.empty:
+                st.markdown("---")
+                st.subheader("Top 5 — Score total por municipio")
+                render_chart(make_top5_individual_charts(dim_top5))
+
+                st.markdown("---")
+                st.subheader("Municipio #1 — Scores por dimension")
+                col_radar, col_table = st.columns([3, 2])
+                with col_radar:
+                    render_chart(make_numero1_radar(dim_top5.iloc[0]))
+                with col_table:
+                    st.markdown(f"**{dim_top5.iloc[0]['municipio']} ({dim_top5.iloc[0]['departamento']})**")
+                    dim_detail = {
+                        "Dimension": list(_DIM_LABELS.values()),
+                        "Score": [
+                            round(float(dim_top5.iloc[0].get(d, 0) or 0), 4)
+                            for d in _DIM_LABELS
+                        ],
+                        "Peso": [f"{_DIM_WEIGHTS[d]:.0%}" for d in _DIM_LABELS],
+                        "Aporte": [
+                            round(float(dim_top5.iloc[0].get(d, 0) or 0) * _DIM_WEIGHTS[d], 4)
+                            for d in _DIM_LABELS
+                        ],
+                    }
+                    st.dataframe(
+                        pd.DataFrame(dim_detail),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    score_total = float(dim_top5.iloc[0].get("v_i_multidimensional", 0) or 0)
+                    st.metric("Score total multidimensional", f"{score_total:.4f}")
+
         st.dataframe(
             format_table(top),
             use_container_width=True,
