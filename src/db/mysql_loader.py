@@ -595,6 +595,122 @@ def build_simem() -> dict[str, pd.DataFrame]:
     return result
 
 
+def build_nasa_municipios() -> pd.DataFrame | None:
+    path = DATA_CLEAN_DIR / "nasa_power" / "nasa_power_resumen_municipios.csv"
+    if not path.exists():
+        return None
+    df = read_csv(path, string_columns=["codigo_dane"])
+    df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
+    return df
+
+
+def build_upra_tierra() -> pd.DataFrame | None:
+    path = DATA_CLEAN_DIR / "upra_tierra" / "upra_precio_tierra_municipal.csv"
+    if not path.exists():
+        return None
+    df = read_csv(path, string_columns=["codigo_dane"])
+    df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
+    return df
+
+
+def build_upra_agropecuario() -> pd.DataFrame | None:
+    path = DATA_CLEAN_DIR / "upra_agropecuario" / "upra_agropecuario_municipal.csv"
+    if not path.exists():
+        return None
+    df = read_csv(path, string_columns=["codigo_dane"])
+    df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
+    return df
+
+
+def build_invias_vias() -> pd.DataFrame | None:
+    path = DATA_CLEAN_DIR / "invias_vias" / "distancia_vias_municipios.csv"
+    if not path.exists():
+        return None
+    df = read_csv(path, string_columns=["codigo_dane"])
+    df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
+    return df
+
+
+def build_ideam_riesgo() -> pd.DataFrame | None:
+    path = DATA_CLEAN_DIR / "ideam_riesgo" / "ideam_riesgo_municipal.csv"
+    if not path.exists():
+        return None
+    df = read_csv(path, string_columns=["codigo_dane"])
+    df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
+    return df
+
+
+def build_sui_agua() -> pd.DataFrame | None:
+    path = DATA_CLEAN_DIR / "sui_agua" / "sui_costo_agua_municipal.csv"
+    if not path.exists():
+        return None
+    df = read_csv(path, string_columns=["codigo_dane"])
+    df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
+    return df
+
+
+def build_imrc_dnp() -> pd.DataFrame | None:
+    path = DATA_CLEAN_DIR / "ideam_riesgo" / "ideam_riesgo_municipal.csv"
+    if not path.exists():
+        return None
+    df = read_csv(path, string_columns=["codigo_dane"])
+    df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
+    return df
+
+
+def build_sui_aseo() -> pd.DataFrame | None:
+    path = DATA_CLEAN_DIR / "sui_aseo" / "sui_aseo_municipal.csv"
+    if not path.exists():
+        return None
+    df = read_csv(path, string_columns=["codigo_dane"])
+    df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
+    return df
+
+
+def build_ideam_bart() -> pd.DataFrame | None:
+    path = DATA_CLEAN_DIR / "ideam_bart" / "ideam_clima_municipal.csv"
+    if not path.exists():
+        return None
+    df = read_csv(path, string_columns=["codigo_dane"])
+    df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
+    return df
+
+
+def build_era5() -> pd.DataFrame | None:
+    path = DATA_CLEAN_DIR / "copernicus_era5" / "era5_resumen_municipios.csv"
+    if not path.exists():
+        return None
+    df = read_csv(path, string_columns=["codigo_dane"])
+    df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
+    return df
+
+
+def build_upra_conflicto() -> pd.DataFrame | None:
+    path = DATA_CLEAN_DIR / "upra_conflicto" / "upra_conflicto_municipal.csv"
+    if not path.exists():
+        return None
+    df = read_csv(path, string_columns=["codigo_dane"])
+    df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
+    return df
+
+
+def build_viabilidad_multidimensional() -> pd.DataFrame | None:
+    path = DATA_CLEAN_DIR / "viabilidad_municipal" / "viabilidad_municipal_multidimensional.csv"
+    if not path.exists():
+        return None
+    df = read_csv(path, string_columns=["codigo_dane"])
+    df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
+    dim_cols = [
+        "codigo_dane",
+        "score_fisico", "score_electrico", "score_economico",
+        "score_agropecuario", "score_riesgo",
+        "v_i_multidimensional", "clasificacion_multidim",
+        "dims_disponibles", "dims_faltantes",
+    ]
+    available = [c for c in dim_cols if c in df.columns]
+    return df[available].copy()
+
+
 def build_viabilidad_and_clusters() -> dict[str, pd.DataFrame]:
     viability_path = DATA_CLEAN_DIR / "viabilidad_municipal" / "viabilidad_municipal_preliminar.csv"
     cluster_dir = DATA_CLEAN_DIR / "clusters_municipios"
@@ -630,6 +746,19 @@ def build_tables() -> list[TableSpec]:
     solar_scenarios, energy_prices = build_solar_and_prices(departments)
     simem = build_simem()
     model_data = build_viabilidad_and_clusters()
+
+    nasa_municipios = build_nasa_municipios()
+    upra_tierra = build_upra_tierra()
+    upra_agro = build_upra_agropecuario()
+    invias = build_invias_vias()
+    ideam = build_ideam_riesgo()
+    sui_agua = build_sui_agua()
+    imrc_dnp = build_imrc_dnp()
+    sui_aseo = build_sui_aseo()
+    ideam_bart = build_ideam_bart()
+    era5 = build_era5()
+    upra_conflicto = build_upra_conflicto()
+    viabilidad_multidim = build_viabilidad_multidimensional()
 
     return [
         TableSpec(
@@ -962,6 +1091,150 @@ def build_tables() -> list[TableSpec]:
         ),
     ]
 
+    optional_tables = []
+
+    if nasa_municipios is not None:
+        optional_tables.append(TableSpec(
+            name="municipio_nasa_climatico",
+            df=nasa_municipios,
+            primary_key=["codigo_dane"],
+            foreign_keys=[
+                ForeignKeySpec(["codigo_dane"], "municipios", ["codigo_dane"], "fk_nasa_climatico_municipio")
+            ],
+            type_overrides={"codigo_dane": "CHAR(5)"},
+        ))
+
+    if upra_tierra is not None:
+        optional_tables.append(TableSpec(
+            name="municipio_upra_tierra",
+            df=upra_tierra,
+            primary_key=["codigo_dane"],
+            foreign_keys=[
+                ForeignKeySpec(["codigo_dane"], "municipios", ["codigo_dane"], "fk_upra_tierra_municipio")
+            ],
+            type_overrides={"codigo_dane": "CHAR(5)"},
+        ))
+
+    if upra_agro is not None:
+        optional_tables.append(TableSpec(
+            name="municipio_upra_agropecuario",
+            df=upra_agro,
+            primary_key=["codigo_dane"],
+            foreign_keys=[
+                ForeignKeySpec(["codigo_dane"], "municipios", ["codigo_dane"], "fk_upra_agro_municipio")
+            ],
+            type_overrides={"codigo_dane": "CHAR(5)"},
+        ))
+
+    if invias is not None:
+        optional_tables.append(TableSpec(
+            name="municipio_invias_vias",
+            df=invias,
+            primary_key=["codigo_dane"],
+            foreign_keys=[
+                ForeignKeySpec(["codigo_dane"], "municipios", ["codigo_dane"], "fk_invias_municipio")
+            ],
+            indexes=[["dist_via_primaria_km"]],
+            type_overrides={"codigo_dane": "CHAR(5)"},
+        ))
+
+    if ideam is not None:
+        optional_tables.append(TableSpec(
+            name="municipio_ideam_riesgo",
+            df=ideam,
+            primary_key=["codigo_dane"],
+            foreign_keys=[
+                ForeignKeySpec(["codigo_dane"], "municipios", ["codigo_dane"], "fk_ideam_municipio")
+            ],
+            type_overrides={"codigo_dane": "CHAR(5)"},
+        ))
+
+    if sui_agua is not None:
+        optional_tables.append(TableSpec(
+            name="municipio_sui_agua",
+            df=sui_agua,
+            primary_key=["codigo_dane"],
+            foreign_keys=[
+                ForeignKeySpec(["codigo_dane"], "municipios", ["codigo_dane"], "fk_sui_agua_municipio")
+            ],
+            type_overrides={"codigo_dane": "CHAR(5)"},
+        ))
+
+    if imrc_dnp is not None:
+        optional_tables.append(TableSpec(
+            name="municipio_imrc_riesgo",
+            df=imrc_dnp,
+            primary_key=["codigo_dane"],
+            foreign_keys=[
+                ForeignKeySpec(["codigo_dane"], "municipios", ["codigo_dane"], "fk_imrc_municipio")
+            ],
+            indexes=[["riesgo_inundacion_idx"], ["imrc_exceso"]],
+            type_overrides={"codigo_dane": "CHAR(5)"},
+        ))
+
+    if sui_aseo is not None:
+        optional_tables.append(TableSpec(
+            name="municipio_sui_aseo",
+            df=sui_aseo,
+            primary_key=["codigo_dane"],
+            foreign_keys=[
+                ForeignKeySpec(["codigo_dane"], "municipios", ["codigo_dane"], "fk_sui_aseo_municipio")
+            ],
+            type_overrides={"codigo_dane": "CHAR(5)"},
+        ))
+
+    if ideam_bart is not None:
+        optional_tables.append(TableSpec(
+            name="municipio_ideam_bart_clima",
+            df=ideam_bart,
+            primary_key=["codigo_dane"],
+            foreign_keys=[
+                ForeignKeySpec(["codigo_dane"], "municipios", ["codigo_dane"], "fk_ideam_bart_municipio")
+            ],
+            indexes=[["t_media_c"]],
+            type_overrides={"codigo_dane": "CHAR(5)"},
+        ))
+
+    if era5 is not None:
+        optional_tables.append(TableSpec(
+            name="municipio_era5_clima",
+            df=era5,
+            primary_key=["codigo_dane"],
+            foreign_keys=[
+                ForeignKeySpec(["codigo_dane"], "municipios", ["codigo_dane"], "fk_era5_municipio")
+            ],
+            indexes=[["t2m_media_c"]],
+            type_overrides={"codigo_dane": "CHAR(5)"},
+        ))
+
+    if upra_conflicto is not None:
+        optional_tables.append(TableSpec(
+            name="municipio_upra_conflicto",
+            df=upra_conflicto,
+            primary_key=["codigo_dane"],
+            foreign_keys=[
+                ForeignKeySpec(["codigo_dane"], "municipios", ["codigo_dane"], "fk_upra_conflicto_municipio")
+            ],
+            indexes=[["conflicto_dominante"], ["score_conflicto"]],
+            type_overrides={"codigo_dane": "CHAR(5)"},
+        ))
+
+    if viabilidad_multidim is not None:
+        optional_tables.append(TableSpec(
+            name="viabilidad_multidimensional",
+            df=viabilidad_multidim,
+            primary_key=["codigo_dane"],
+            foreign_keys=[
+                ForeignKeySpec(
+                    ["codigo_dane"], "municipios", ["codigo_dane"], "fk_viabilidad_multidim_municipio"
+                )
+            ],
+            indexes=[["v_i_multidimensional"], ["clasificacion_multidim"]],
+            type_overrides={"codigo_dane": "CHAR(5)"},
+        ))
+
+    return tables + optional_tables
+
 
 def build_views_sql() -> str:
     return """
@@ -1039,6 +1312,37 @@ LEFT JOIN subestaciones s ON s.id_subestacion = mr.id_subestacion_mas_cercana;
 """.strip() + "\n"
 
 
+def build_optional_views_sql(tables: list[TableSpec]) -> str:
+    table_names = {t.name for t in tables}
+    views = []
+
+    if "viabilidad_multidimensional" in table_names:
+        views.append("""
+CREATE OR REPLACE VIEW `vw_comparacion_scores` AS
+SELECT
+  m.codigo_dane,
+  m.municipio,
+  d.departamento,
+  v.v_i_modelo_rural,
+  vm.v_i_multidimensional,
+  vm.score_fisico,
+  vm.score_electrico,
+  vm.score_economico,
+  vm.score_agropecuario,
+  vm.score_riesgo,
+  vm.clasificacion_multidim,
+  vm.dims_disponibles,
+  vm.dims_faltantes
+FROM municipios m
+JOIN departamentos d ON d.departamento_id = m.departamento_id
+LEFT JOIN viabilidad_municipal v ON v.codigo_dane = m.codigo_dane
+LEFT JOIN viabilidad_multidimensional vm ON vm.codigo_dane = m.codigo_dane
+ORDER BY vm.v_i_multidimensional DESC;
+""".strip())
+
+    return "\n".join(views) + ("\n" if views else "")
+
+
 def build_bootstrap_sql(database: str) -> str:
     tables = build_tables()
     ordered_table_names = [table.name for table in tables]
@@ -1065,6 +1369,7 @@ def build_bootstrap_sql(database: str) -> str:
         if insert_sql:
             statements.append(insert_sql)
     statements.append(build_views_sql())
+    statements.append(build_optional_views_sql(tables))
     return "\n".join(statements)
 
 
@@ -1102,6 +1407,9 @@ def apply_bootstrap(database: str, settings: MySQLSettings) -> None:
             raise RuntimeError(f"Fallo cargando datos en la tabla '{table.name}'.") from error
 
     execute_sql(build_views_sql(), settings=settings, database=database)
+    optional_views = build_optional_views_sql(tables)
+    if optional_views.strip():
+        execute_sql(optional_views, settings=settings, database=database)
 
 
 def parse_args() -> argparse.Namespace:

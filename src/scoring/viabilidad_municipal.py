@@ -6,6 +6,12 @@ from typing import Any
 
 import pandas as pd
 
+from .dimensiones_scoring import (
+    DEFAULT_DIMENSION_WEIGHTS,
+    build_multidimensional_score,
+    write_observations as write_multidim_observations,
+)
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PVOUT_PATH = PROJECT_ROOT / "data" / "clean" / "pvout_municipios" / "pvout_puntos_extraidos.csv"
@@ -25,6 +31,37 @@ DEFAULT_DEMAND_PATH = (
     PROJECT_ROOT / "data" / "clean" / "xm_demanda_municipal" / "xm_demanda_municipal_proxy.csv"
 )
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "clean" / "viabilidad_municipal"
+
+DEFAULT_NASA_MUNICIPIOS_PATH = (
+    PROJECT_ROOT / "data" / "clean" / "nasa_power" / "nasa_power_resumen_municipios.csv"
+)
+DEFAULT_UPRA_TIERRA_PATH = (
+    PROJECT_ROOT / "data" / "clean" / "upra_tierra" / "upra_precio_tierra_municipal.csv"
+)
+DEFAULT_UPRA_AGRO_PATH = (
+    PROJECT_ROOT / "data" / "clean" / "upra_agropecuario" / "upra_agropecuario_municipal.csv"
+)
+DEFAULT_INVIAS_PATH = (
+    PROJECT_ROOT / "data" / "clean" / "invias_vias" / "distancia_vias_municipios.csv"
+)
+DEFAULT_IDEAM_PATH = (
+    PROJECT_ROOT / "data" / "clean" / "ideam_riesgo" / "ideam_riesgo_municipal.csv"
+)
+DEFAULT_SUI_AGUA_PATH = (
+    PROJECT_ROOT / "data" / "clean" / "sui_agua" / "sui_costo_agua_municipal.csv"
+)
+DEFAULT_IDEAM_BART_PATH = (
+    PROJECT_ROOT / "data" / "clean" / "ideam_bart" / "ideam_clima_municipal.csv"
+)
+DEFAULT_ERA5_PATH = (
+    PROJECT_ROOT / "data" / "clean" / "copernicus_era5" / "era5_resumen_municipios.csv"
+)
+DEFAULT_UPRA_CONFLICTO_PATH = (
+    PROJECT_ROOT / "data" / "clean" / "upra_conflicto" / "upra_conflicto_municipal.csv"
+)
+DEFAULT_SUI_ASEO_PATH = (
+    PROJECT_ROOT / "data" / "clean" / "sui_aseo" / "sui_aseo_municipal.csv"
+)
 
 
 RURAL_WEIGHTS = {
@@ -506,6 +543,18 @@ def write_observations(output_path: Path, scored: pd.DataFrame) -> None:
     output_path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _load_optional_csv(path: Path, key_col: str = "codigo_dane") -> pd.DataFrame | None:
+    """Carga CSV opcional; retorna None si no existe o esta vacio."""
+    if path is None or not path.exists():
+        return None
+    try:
+        df = pd.read_csv(path, dtype={key_col: "string"})
+        df[key_col] = df[key_col].astype("string").str.zfill(5)
+        return df if not df.empty else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def run_scoring(
     pvout_path: Path = DEFAULT_PVOUT_PATH,
     slope_path: Path = DEFAULT_SLOPE_PATH,
@@ -516,8 +565,18 @@ def run_scoring(
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     top_n: int = 10,
     distance_limit_km: float = PRELIMINARY_DISTANCE_LIMIT_KM,
+    nasa_municipios_path: Path | None = DEFAULT_NASA_MUNICIPIOS_PATH,
+    upra_tierra_path: Path | None = DEFAULT_UPRA_TIERRA_PATH,
+    upra_agro_path: Path | None = DEFAULT_UPRA_AGRO_PATH,
+    invias_path: Path | None = DEFAULT_INVIAS_PATH,
+    ideam_path: Path | None = DEFAULT_IDEAM_PATH,
+    sui_agua_path: Path | None = DEFAULT_SUI_AGUA_PATH,
+    ideam_bart_path: Path | None = DEFAULT_IDEAM_BART_PATH,
+    era5_path: Path | None = DEFAULT_ERA5_PATH,
+    upra_conflicto_path: Path | None = DEFAULT_UPRA_CONFLICTO_PATH,
+    sui_aseo_path: Path | None = DEFAULT_SUI_ASEO_PATH,
 ) -> dict[str, Path]:
-    """Ejecuta scoring preliminar municipal."""
+    """Ejecuta scoring preliminar municipal y scoring multidimensional."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
     pvout, slope, grid_distance, runap, pot, demand = load_inputs(
@@ -553,17 +612,64 @@ def run_scoring(
     )
     write_observations(observations_path, scored)
 
-    return {
+    outputs = {
         "scored": scored_path,
         "top": top_path,
         "top_sensibilidad_demanda": top_bonus_path,
         "observations": observations_path,
     }
 
+    nasa_df = _load_optional_csv(nasa_municipios_path)
+    upra_tierra_df = _load_optional_csv(upra_tierra_path)
+    upra_agro_df = _load_optional_csv(upra_agro_path)
+    invias_df = _load_optional_csv(invias_path)
+    ideam_df = _load_optional_csv(ideam_path)
+    sui_agua_df = _load_optional_csv(sui_agua_path)
+    ideam_bart_df = _load_optional_csv(ideam_bart_path)
+    era5_df = _load_optional_csv(era5_path)
+    upra_conflicto_df = _load_optional_csv(upra_conflicto_path)
+    sui_aseo_df = _load_optional_csv(sui_aseo_path)
+
+    has_multidim_data = any(
+        df is not None
+        for df in [nasa_df, upra_tierra_df, upra_agro_df, invias_df, ideam_df,
+                   sui_agua_df, ideam_bart_df, era5_df, upra_conflicto_df, sui_aseo_df]
+    )
+
+    if has_multidim_data or True:
+        multidim = build_multidimensional_score(
+            base=scored,
+            nasa_municipios=nasa_df,
+            upra_tierra=upra_tierra_df,
+            upra_agro=upra_agro_df,
+            invias=invias_df,
+            ideam=ideam_df,
+            sui_agua=sui_agua_df,
+            ideam_bart=ideam_bart_df,
+            era5=era5_df,
+            upra_conflicto=upra_conflicto_df,
+            sui_aseo=sui_aseo_df,
+        )
+        multidim_path = output_dir / "viabilidad_municipal_multidimensional.csv"
+        top_multidim_path = output_dir / f"top{top_n}_multidimensional.csv"
+        multidim_observations_path = output_dir / "observaciones_multidimensional.txt"
+
+        multidim.to_csv(multidim_path, index=False, encoding="utf-8-sig")
+        multidim.dropna(subset=["v_i_multidimensional"]).sort_values(
+            "v_i_multidimensional", ascending=False
+        ).head(top_n).to_csv(top_multidim_path, index=False, encoding="utf-8-sig")
+        write_multidim_observations(multidim_observations_path, multidim, DEFAULT_DIMENSION_WEIGHTS)
+
+        outputs["multidimensional"] = multidim_path
+        outputs["top_multidimensional"] = top_multidim_path
+        outputs["observations_multidim"] = multidim_observations_path
+
+    return outputs
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Construye score municipal preliminar con PVOUT y pendiente, sin diagramas."
+        description="Construye score municipal preliminar y multidimensional."
     )
     parser.add_argument("--pvout-path", type=Path, default=DEFAULT_PVOUT_PATH)
     parser.add_argument("--slope-path", type=Path, default=DEFAULT_SLOPE_PATH)
@@ -574,6 +680,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--top-n", type=int, default=10)
     parser.add_argument("--distance-limit-km", type=float, default=PRELIMINARY_DISTANCE_LIMIT_KM)
+    parser.add_argument("--nasa-municipios-path", type=Path, default=DEFAULT_NASA_MUNICIPIOS_PATH)
+    parser.add_argument("--upra-tierra-path", type=Path, default=DEFAULT_UPRA_TIERRA_PATH)
+    parser.add_argument("--upra-agro-path", type=Path, default=DEFAULT_UPRA_AGRO_PATH)
+    parser.add_argument("--invias-path", type=Path, default=DEFAULT_INVIAS_PATH)
+    parser.add_argument("--ideam-path", type=Path, default=DEFAULT_IDEAM_PATH)
+    parser.add_argument("--sui-agua-path", type=Path, default=DEFAULT_SUI_AGUA_PATH)
+    parser.add_argument("--ideam-bart-path", type=Path, default=DEFAULT_IDEAM_BART_PATH)
+    parser.add_argument("--era5-path", type=Path, default=DEFAULT_ERA5_PATH)
+    parser.add_argument("--upra-conflicto-path", type=Path, default=DEFAULT_UPRA_CONFLICTO_PATH)
+    parser.add_argument("--sui-aseo-path", type=Path, default=DEFAULT_SUI_ASEO_PATH)
     return parser.parse_args()
 
 
@@ -589,6 +705,16 @@ def main() -> int:
         output_dir=args.output_dir,
         top_n=args.top_n,
         distance_limit_km=args.distance_limit_km,
+        nasa_municipios_path=args.nasa_municipios_path,
+        upra_tierra_path=args.upra_tierra_path,
+        upra_agro_path=args.upra_agro_path,
+        invias_path=args.invias_path,
+        ideam_path=args.ideam_path,
+        sui_agua_path=args.sui_agua_path,
+        ideam_bart_path=args.ideam_bart_path,
+        era5_path=args.era5_path,
+        upra_conflicto_path=args.upra_conflicto_path,
+        sui_aseo_path=args.sui_aseo_path,
     )
     print("Score municipal preliminar generado.")
     for name, path in outputs.items():
