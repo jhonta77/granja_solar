@@ -1,63 +1,57 @@
-"""Carga productividad agropecuaria municipal (carga bovina y pasto).
+"""Carga productividad agropecuaria municipal (UGG/ha) desde EVA pecuaria ICA.
 
-Estado de acceso a la API
---------------------------
-No existe una API REST publica y estable para datos de carga bovina o
-productividad de pastos a nivel municipal en Colombia. Las fuentes disponibles
-requieren descarga manual:
+Fuente principal
+----------------
+EVA Pecuaria - Inventario Bovino 2019-2023 (ICA / MADR).
+Archivo: BasePecuaria20192023.xlsx  (hoja InvBovino)
+Descarga: https://www.agronet.gov.co/estadistica/Paginas/home.aspx?cod=1
+  Seccion: Pecuaria -> Bovinos -> por municipio
 
-COMO OBTENER LOS DATOS MANUALMENTE
--------------------------------------
-Opcion 1 - EVA (Evaluaciones Agropecuarias Municipales) - MADR/AGRONET:
-    URL: https://www.agronet.gov.co/estadistica/Paginas/home.aspx?cod=1
-    Dataset: "Produccion agricola y pecuaria municipal"
-    Seccion: "Pecuaria" → "Bovinos" → por municipio
-    Columnas utiles: municipio, codigo_dane, inventario_bovinos, area_pasturas_ha
-    Carga bovina = inventario_bovinos / area_pasturas_ha
+Calculo de UGG (Unidades Gran Ganado)
+--------------------------------------
+El archivo EVA tiene el inventario desglosado por categoria de animal.
+Se convierte a UGG usando factores FEDEGAN:
 
-Opcion 2 - UPRA Zonificacion Agropecuaria:
-    URL: https://visor.upra.gov.co/
-    Seccion: "Uso adecuado del suelo" → "Ganaderia"
-    Exportar tabla municipal con capacidad de carga animal
+    Terneras/Terneros < 1 ano     -> 0.4 UGG
+    Hembras/Machos 1-2 anos       -> 0.6 UGG
+    Hembras/Machos 2-3 anos       -> 0.8 UGG
+    Hembras > 3 anos (vacas)      -> 1.0 UGG
+    Machos > 3 anos (toros)       -> 1.2 UGG
 
-Opcion 3 - FEDEGAN (datos agregados por departamento, menos granulares):
-    URL: https://www.fedegan.org.co/estadisticas/inventario-ganadero
+Carga bovina proxy
+------------------
+El archivo EVA no incluye area de pasturas por municipio.
+Se usa area_km2_igac * 100 (ha totales del municipio) como denominador.
+Esto subestima la carga real donde no toda el area es pastura, pero
+produce una metrica RELATIVA consistente para comparar municipios.
 
-Opcion 4 - DANE Encuesta Nacional Agropecuaria (ENA):
-    URL: https://www.dane.gov.co/index.php/estadisticas-por-tema/agropecuario/
-    Nota: la ENA no siempre tiene nivel municipal.
+Para interpretar correctamente el score, el resultado se clasifica
+en bandas de sistema productivo (FEDEGAN/AGROSAVIA):
 
-Estructura esperada del CSV de entrada
----------------------------------------
-El archivo debe tener al menos:
-    codigo_dane       : codigo DANE 5 digitos
-    carga_bovina      : unidades animales por hectarea (UA/ha o cabezas/ha)
-
-Columnas opcionales reconocidas:
-    productividad_pasto_ton_ha, inventario_bovinos, area_pasturas_ha,
-    fuente, anio, departamento, municipio
-
-Si solo tienes inventario_bovinos y area_pasturas_ha (EVA), el script
-calcula la carga bovina automaticamente.
+    extensivo_bajo:  ugg_ha < 1      (pasturas nativas, sin tecnificacion)
+    tradicional:     1 <= ugg_ha < 3 (tropico bajo convencional: 1.5-1.8)
+    tecnificado:     ugg_ha >= 3     (fincas tecnificadas: 3-4 cabezas/ha)
 
 Salida
 ------
     data/clean/upra_agropecuario/upra_agropecuario_municipal.csv
 
 Columnas:
-    codigo_dane                 CHAR(5)
-    carga_bovina_ua_ha          DOUBLE  unidades animales / ha de pastura
-    productividad_pasto_ton_ha  DOUBLE  rendimiento de pasto (si disponible)
-    inventario_bovinos          INT     cabezas de ganado (si disponible)
-    area_pasturas_ha            DOUBLE  area en pasturas (si disponible)
-    fuente_agropecuaria         VARCHAR
-    anio_referencia_agro        INT
-    fecha_carga_utc             VARCHAR
+    codigo_dane             CHAR(5)
+    inventario_bovinos      INT     total cabezas
+    ugg_total               DOUBLE  total en unidades gran ganado
+    area_municipio_ha       DOUBLE  area total municipio en hectareas
+    ugg_ha_proxy            DOUBLE  UGG / ha total municipio (proxy)
+    carga_bovina_ua_ha      DOUBLE  alias de ugg_ha_proxy (compatibilidad)
+    sistema_productivo      VARCHAR extensivo_bajo | tradicional | tecnificado
+    anio_referencia_agro    INT
+    fuente_agropecuaria     VARCHAR
+    fecha_carga_utc         VARCHAR
 
 Uso
 ---
-    python -m src.extract.upra_agropecuario --input-csv data/raw/eva/pecuario_municipal.csv
-    python -m src.extract.upra_agropecuario --input-csv ruta.csv --anio 2022
+    python -m src.extract.upra_agropecuario
+    python -m src.extract.upra_agropecuario --input-xlsx data/raw/BasePecuaria20192023.xlsx
 """
 
 from __future__ import annotations
@@ -72,157 +66,268 @@ import pandas as pd
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_INPUT_XLSX = PROJECT_ROOT / "data" / "raw" / "BasePecuaria20192023 (1).xlsx"
+DEFAULT_MUNICIPALITIES_CSV = (
+    PROJECT_ROOT / "data" / "clean" / "base_municipios" / "municipios_distritos_colombia.csv"
+)
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "clean" / "upra_agropecuario"
 
-_DANE_NAMES = {"codigo_dane", "codigo_municipio", "cod_dane", "dane", "cod_mpio", "codmpio"}
-_CARGA_NAMES = {
-    "carga_bovina", "carga_bovina_ua_ha", "ua_ha", "cabezas_ha",
-    "unidades_animales_ha", "carga_animal_ua_ha", "capacidad_carga",
-}
-_INVENTARIO_NAMES = {
-    "inventario_bovinos", "bovinos", "cabezas_ganado", "total_bovinos",
-    "inventario_ganado", "num_bovinos",
-}
-_AREA_PASTO_NAMES = {
-    "area_pasturas_ha", "area_pasto_ha", "hectareas_pasto", "pasturas_ha",
-    "area_pastizales_ha", "ha_pasto",
-}
-_PRODUCTIVIDAD_NAMES = {
-    "productividad_pasto_ton_ha", "rendimiento_pasto", "ton_ha_pasto",
-    "produccion_pasto_ton_ha",
+# Factores UGG por categoria (FEDEGAN)
+_UGG_FACTORS: dict[str, float] = {
+    "terneras_lt1": 0.4,
+    "terneros_lt1": 0.4,
+    "hembras_1_2":  0.6,
+    "machos_1_2":   0.6,
+    "hembras_2_3":  0.8,
+    "machos_2_3":   0.8,
+    "hembras_gt3":  1.0,  # vacas adultas
+    "machos_gt3":   1.2,  # toros
 }
 
+# Bandas de sistema productivo (FEDEGAN / AGROSAVIA)
+_BANDS = [
+    (0.0, 1.0,  "extensivo_bajo"),
+    (1.0, 3.0,  "tradicional"),
+    (3.0, 9999, "tecnificado"),
+]
 
-def normalize_col(value: Any) -> str:
-    text = "" if value is None else str(value)
-    text = unicodedata.normalize("NFKD", text)
-    text = "".join(c for c in text if not unicodedata.combining(c))
-    return text.lower().strip().replace(" ", "_").replace("-", "_")
+
+def _norm(value: Any) -> str:
+    text = unicodedata.normalize("NFKD", "" if value is None else str(value))
+    return "".join(c for c in text if not unicodedata.combining(c)).lower().strip()
 
 
-def detect_column(df: pd.DataFrame, candidates: set[str], label: str, required: bool = True) -> str | None:
-    normalized = {col: normalize_col(col) for col in df.columns}
-    for col, norm in normalized.items():
-        if norm in candidates:
+def _detect_col(df: pd.DataFrame, keywords: list[str]) -> str | None:
+    """Busca columna cuyo nombre normalizado contenga todos los keywords."""
+    for col in df.columns:
+        col_norm = _norm(col)
+        if all(kw in col_norm for kw in keywords):
             return col
-    if required:
-        raise ValueError(
-            f"No se encontro columna '{label}' en el CSV. "
-            f"Columnas disponibles: {list(df.columns)}. "
-            f"Nombres aceptados: {sorted(candidates)}"
-        )
     return None
 
 
-def load_input_csv(path: Path, anio: int | None) -> pd.DataFrame:
-    df = pd.read_csv(path, dtype=str)
-    dane_col = detect_column(df, _DANE_NAMES, "codigo_dane", required=True)
+def _parse_num(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce")
 
-    result = pd.DataFrame()
-    result["codigo_dane"] = df[dane_col].astype("string").str.strip().str.zfill(5)
 
-    carga_col = detect_column(df, _CARGA_NAMES, "carga_bovina", required=False)
-    inventario_col = detect_column(df, _INVENTARIO_NAMES, "inventario_bovinos", required=False)
-    area_col = detect_column(df, _AREA_PASTO_NAMES, "area_pasturas_ha", required=False)
+def _classify_band(val: float) -> str:
+    for low, high, label in _BANDS:
+        if low <= val < high:
+            return label
+    return "tecnificado"
 
-    if carga_col is not None:
-        result["carga_bovina_ua_ha"] = pd.to_numeric(df[carga_col], errors="coerce")
-    elif inventario_col is not None and area_col is not None:
-        inventario = pd.to_numeric(df[inventario_col], errors="coerce")
-        area = pd.to_numeric(df[area_col], errors="coerce")
-        result["carga_bovina_ua_ha"] = (inventario / area).where(area > 0)
-        result["inventario_bovinos"] = inventario.astype("Int64")
-        result["area_pasturas_ha"] = area
-    else:
+
+def _read_invbovino(path: Path) -> pd.DataFrame:
+    """Lee hoja InvBovino saltando las filas de titulo."""
+    xl = pd.ExcelFile(path)
+    # Preferir hoja InvBovino; si no existe usar la primera
+    sheet = "InvBovino" if "InvBovino" in xl.sheet_names else xl.sheet_names[0]
+    # Las primeras 3 filas son titulo/fuente; fila 3 es el header real
+    df = pd.read_excel(path, sheet_name=sheet, header=3, dtype=str)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def _compute_ugg(df: pd.DataFrame) -> pd.Series:
+    """Suma UGG ponderados a partir de las columnas de categoria."""
+    ugg = pd.Series(0.0, index=df.index)
+
+    col_map = {
+        "terneras_lt1": ["terneras", "1"],
+        "terneros_lt1": ["terneros", "1"],
+        "hembras_1_2":  ["hembras", "1", "2"],
+        "machos_1_2":   ["machos", "1", "2"],
+        "hembras_2_3":  ["hembras", "2", "3"],
+        "machos_2_3":   ["machos", "2", "3"],
+        "hembras_gt3":  ["hembras", "3"],
+        "machos_gt3":   ["machos", "3"],
+    }
+
+    # Asignar columnas a categorias
+    used: set[str] = set()
+    assignments: dict[str, str] = {}
+
+    for cat, keywords in col_map.items():
+        for col in df.columns:
+            if col in used:
+                continue
+            col_norm = _norm(col)
+            if all(kw in col_norm for kw in keywords):
+                assignments[cat] = col
+                used.add(col)
+                break
+
+    for cat, col in assignments.items():
+        factor = _UGG_FACTORS[cat]
+        ugg += _parse_num(df[col]).fillna(0) * factor
+
+    n_assigned = len(assignments)
+    print(f"  Categorias UGG asignadas: {n_assigned}/8 -> {list(assignments.keys())}")
+    return ugg
+
+
+def load_pecuaria(path: Path, municipalities_csv: Path) -> pd.DataFrame:
+    df = _read_invbovino(path)
+
+    # Columnas clave
+    dane_col = _detect_col(df, ["dane", "municipio"]) or _detect_col(df, ["codigo", "mun"])
+    anio_col = _detect_col(df, ["a", "o"]) or _detect_col(df, ["ano"]) or _detect_col(df, ["year"])
+    total_col = _detect_col(df, ["total", "bovino"])
+
+    # Buscar codigo dane municipio (columna con "dane" y "municipio" o similar)
+    dane_mun_col = None
+    for col in df.columns:
+        n = _norm(col)
+        if "dane" in n and "municipio" in n:
+            dane_mun_col = col
+            break
+        if "codigo" in n and "municipio" in n:
+            dane_mun_col = col
+            break
+    if dane_mun_col is None:
+        # fallback: buscar columna que tenga codigos tipo "05001"
+        for col in df.columns:
+            sample = df[col].dropna().head(10)
+            if sample.astype(str).str.match(r"^\d{4,5}$").sum() >= 5:
+                dane_mun_col = col
+                break
+
+    if dane_mun_col is None:
         raise ValueError(
-            "El CSV debe tener columna 'carga_bovina' (UA/ha) o bien "
-            "'inventario_bovinos' + 'area_pasturas_ha' para calcularla."
+            f"No se encontro columna de codigo DANE municipio.\n"
+            f"Columnas disponibles: {list(df.columns)}"
         )
 
-    if inventario_col is not None and "inventario_bovinos" not in result.columns:
-        result["inventario_bovinos"] = pd.to_numeric(df[inventario_col], errors="coerce").astype("Int64")
-    if area_col is not None and "area_pasturas_ha" not in result.columns:
-        result["area_pasturas_ha"] = pd.to_numeric(df[area_col], errors="coerce")
+    # Columna de ano
+    anio_col = None
+    for col in df.columns:
+        n = _norm(col)
+        if n in {"ano", "a~o", "year", "anio"} or ("a" in n and "o" in n and len(n) <= 4):
+            anio_col = col
+            break
+    if anio_col is None:
+        for col in df.columns:
+            vals = pd.to_numeric(df[col], errors="coerce").dropna()
+            if len(vals) > 0 and vals.between(2015, 2030).mean() > 0.8:
+                anio_col = col
+                break
 
-    prod_col = detect_column(df, _PRODUCTIVIDAD_NAMES, "productividad_pasto", required=False)
-    result["productividad_pasto_ton_ha"] = (
-        pd.to_numeric(df[prod_col], errors="coerce") if prod_col else pd.NA
+    print(f"  DANE col: {dane_mun_col!r}  |  Ano col: {anio_col!r}")
+
+    # Calcular UGG
+    df["_ugg"] = _compute_ugg(df)
+    df["_dane"] = df[dane_mun_col].astype(str).str.strip().str.zfill(5)
+    df["_anio"] = pd.to_numeric(df[anio_col], errors="coerce") if anio_col else 0
+
+    # Total bovinos
+    total_col = _detect_col(df, ["total"])
+    df["_total"] = _parse_num(df[total_col]).fillna(0) if total_col else df["_ugg"]
+
+    # Quedarse con el ano mas reciente por municipio
+    df = df.sort_values("_anio", ascending=False)
+    df = df.groupby("_dane", as_index=False).first()
+
+    # Unir con municipios para obtener area_km2_igac
+    munis = pd.read_csv(municipalities_csv, dtype={"codigo_dane": "string"})
+    munis["codigo_dane"] = munis["codigo_dane"].str.zfill(5)
+
+    merged = df.merge(
+        munis[["codigo_dane", "area_km2_igac"]],
+        left_on="_dane",
+        right_on="codigo_dane",
+        how="left",
     )
 
-    anio_col = detect_column(df, {"anio", "year", "ano", "periodo"}, "anio", required=False)
-    result["anio_referencia_agro"] = (
-        pd.to_numeric(df[anio_col], errors="coerce").astype("Int64")
-        if anio_col else (anio if anio is not None else pd.NA)
-    )
+    n_match = merged["codigo_dane"].notna().sum()
+    print(f"  Match con municipios IGAC: {n_match}/{len(merged)}")
 
-    fuente_col = detect_column(df, {"fuente", "source", "origen"}, "fuente", required=False)
-    result["fuente_agropecuaria"] = (
-        df[fuente_col].astype("string").str.strip() if fuente_col else "EVA-MADR"
-    )
+    area_ha = pd.to_numeric(merged["area_km2_igac"], errors="coerce") * 100
 
-    result = result.dropna(subset=["codigo_dane", "carga_bovina_ua_ha"])
-    result = result.drop_duplicates(subset=["codigo_dane"], keep="first")
+    result = pd.DataFrame()
+    result["codigo_dane"] = merged["_dane"]
+    result["inventario_bovinos"] = merged["_total"].astype("Int64")
+    result["ugg_total"] = merged["_ugg"].round(2)
+    result["area_municipio_ha"] = area_ha.round(2)
+    result["ugg_ha_proxy"] = (merged["_ugg"] / area_ha).where(area_ha > 0).round(4)
+    result["carga_bovina_ua_ha"] = result["ugg_ha_proxy"]  # alias para scoring
+    result["sistema_productivo"] = result["ugg_ha_proxy"].apply(
+        lambda x: _classify_band(float(x)) if pd.notna(x) else pd.NA
+    )
+    result["anio_referencia_agro"] = merged["_anio"].astype("Int64")
+    result["fuente_agropecuaria"] = "EVA-ICA BasePecuaria"
+    result = result.dropna(subset=["codigo_dane", "ugg_ha_proxy"])
+    result = result.drop_duplicates(subset=["codigo_dane"])
     result["fecha_carga_utc"] = datetime.now(timezone.utc).isoformat()
+
+    # Resumen de bandas
+    if len(result) > 0:
+        dist = result["sistema_productivo"].value_counts()
+        print(f"  Distribucion sistema productivo:\n{dist.to_string()}")
+
     return result
 
 
 def write_observations(path: Path, n: int, fuente_path: str) -> None:
     lines = [
-        "UPRA/EVA - Productividad agropecuaria municipal",
-        "================================================",
+        "UPRA/EVA - Productividad agropecuaria municipal (UGG/ha)",
+        "=========================================================",
         "",
         f"Registros cargados: {n}",
         f"Archivo fuente: {fuente_path}",
         "",
-        "Fuentes de datos requeridas (descarga manual):",
-        "  EVA-MADR: https://www.agronet.gov.co/estadistica/Paginas/home.aspx?cod=1",
-        "    Seccion: Pecuaria → Bovinos → por municipio",
-        "    Columnas necesarias: codigo_dane, inventario_bovinos, area_pasturas_ha",
+        "Metodologia:",
+        "  - Se calculan UGG (Unidades Gran Ganado) ponderando cada categoria",
+        "    de animal por su factor FEDEGAN:",
+        "      Terneras/Terneros < 1 ano -> 0.4 UGG",
+        "      Hembras/Machos 1-2 anos   -> 0.6 UGG",
+        "      Hembras/Machos 2-3 anos   -> 0.8 UGG",
+        "      Hembras > 3 anos (vacas)  -> 1.0 UGG",
+        "      Machos > 3 anos (toros)   -> 1.2 UGG",
         "",
-        "  UPRA ganaderia: https://visor.upra.gov.co/",
-        "    Seccion: Uso adecuado del suelo → Ganaderia",
+        "  - ugg_ha_proxy = UGG_total / (area_km2_igac * 100)",
+        "    NOTA: el denominador es el area TOTAL del municipio, no solo pasturas.",
+        "    Esto subestima la carga real; se usa como metrica relativa comparativa.",
         "",
-        "  FEDEGAN (departamental): https://www.fedegan.org.co/estadisticas/inventario-ganadero",
+        "Bandas de sistema productivo (FEDEGAN/AGROSAVIA):",
+        "  extensivo_bajo:  ugg_ha < 1      (pasturas nativas, baja productividad)",
+        "  tradicional:     1 <= ugg_ha < 3 (tropico bajo convencional: 1.5-1.8)",
+        "  tecnificado:     ugg_ha >= 3     (fincas tecnificadas: 3-4 cabezas/ha)",
         "",
         "Uso en scoring multidimensional:",
         "  score_agropecuario:",
-        "    carga_bovina_ua_ha alta → mayor costo de oportunidad → mas defensible agrovoltaico.",
-        "    La variable se usa INVERSAMENTE: municipio con alta carga ganadera tiene mayor",
-        "    oportunidad de combinar ganaderia bajo paneles (agrovoltaica).",
-        "",
-        "  costo_oportunidad_agro = precio_tierra_cop_ha × carga_bovina_ua_ha",
-        "    (calcula cuanto vale producir carne vs. producir energia en ese municipio).",
-        "",
-        "Limitaciones:",
-        "  - EVA tiene cobertura variable; no todos los municipios tienen datos en todos los anios.",
-        "  - La carga bovina calculada (inventario/area) asume pasturas homogeneas.",
-        "  - No distingue entre ganaderia extensiva, semi-intensiva e intensiva.",
+        "    carga alta (tecnificado) -> mayor costo de oportunidad -> prioridad agrovoltaica.",
+        "    La variable se normaliza contra las bandas, no contra min/max municipal.",
     ]
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def run_upra_agropecuario(
-    input_csv: Path,
+    input_xlsx: Path = DEFAULT_INPUT_XLSX,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
-    anio: int | None = None,
+    municipalities_csv: Path = DEFAULT_MUNICIPALITIES_CSV,
 ) -> dict[str, Path]:
-    if not input_csv.exists():
+    if not input_xlsx.exists():
         raise FileNotFoundError(
-            f"No existe el archivo: {input_csv}\n"
-            "Descarga los datos EVA desde:\n"
+            f"No existe el archivo: {input_xlsx}\n"
+            "Descarga BasePecuaria desde:\n"
             "  https://www.agronet.gov.co/estadistica/Paginas/home.aspx?cod=1\n"
-            "  Seccion: Pecuaria → Bovinos\n"
-            "y ejecuta: python -m src.extract.upra_agropecuario --input-csv ruta/archivo.csv"
+            "  Seccion: Pecuaria -> Bovinos\n"
+            "y copia el archivo a data/raw/"
+        )
+    if not municipalities_csv.exists():
+        raise FileNotFoundError(
+            f"No existe el archivo de municipios: {municipalities_csv}\n"
+            "Ejecuta primero: python -m src.extract.igac_municipios"
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    df = load_input_csv(input_csv, anio)
+    df = load_pecuaria(input_xlsx, municipalities_csv)
 
     output_path = output_dir / "upra_agropecuario_municipal.csv"
     observations_path = output_dir / "upra_agropecuario_observaciones.txt"
 
     df.to_csv(output_path, index=False, encoding="utf-8-sig")
-    write_observations(observations_path, len(df), str(input_csv))
+    write_observations(observations_path, len(df), str(input_xlsx))
 
     return {
         "agropecuario": output_path,
@@ -232,16 +337,20 @@ def run_upra_agropecuario(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Carga productividad agropecuaria municipal desde EVA/UPRA."
+        description="Carga productividad agropecuaria (UGG/ha) desde EVA pecuaria ICA."
     )
     parser.add_argument(
-        "--input-csv",
+        "--input-xlsx",
         type=Path,
-        required=True,
-        help="CSV con codigo_dane y carga_bovina (o inventario_bovinos + area_pasturas_ha).",
+        default=DEFAULT_INPUT_XLSX,
+        help="Archivo BasePecuaria Excel (InvBovino).",
     )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--anio", type=int, default=None)
+    parser.add_argument(
+        "--municipalities-csv",
+        type=Path,
+        default=DEFAULT_MUNICIPALITIES_CSV,
+    )
     return parser.parse_args()
 
 
@@ -249,9 +358,9 @@ def main() -> int:
     args = parse_args()
     try:
         outputs = run_upra_agropecuario(
-            input_csv=args.input_csv.resolve(),
+            input_xlsx=args.input_xlsx.resolve(),
             output_dir=args.output_dir.resolve(),
-            anio=args.anio,
+            municipalities_csv=args.municipalities_csv.resolve(),
         )
     except Exception as error:  # noqa: BLE001
         print(f"ERROR: {error}")
