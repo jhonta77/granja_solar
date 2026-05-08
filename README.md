@@ -351,6 +351,17 @@ Funciones:
 - Consulta radiacion diaria por puntos.
 - Resume resultados por punto.
 
+Costos y riesgos municipales:
+
+    src/extract/costos_riesgos_municipales.py
+
+Funciones:
+
+- Descarga precios rurales UPRA, tarifas de acueducto SUI y viento IDEAM desde Datos Abiertos.
+- Cruza registros contra la base municipal por codigo DANE cuando existe o por municipio/departamento.
+- Exporta precios de tierra, tarifa de agua, velocidad de viento y scores normalizados.
+- Documenta cobertura, flags de disponibilidad e imputacion posterior usada por el score.
+
 Economia solar:
 
     src/transform/solar_economics.py
@@ -385,6 +396,7 @@ Funciones:
 - Integra PVOUT, pendiente, red, RUNAP, POT y demanda.
 - Calcula componentes normalizados.
 - Calcula V_i rural sin demanda y clasificacion preliminar.
+- Calcula v_i_modelo_rural_economico_climatico con tierra, agua y viento.
 - Exporta score_rural_con_bono_demanda solo como sensibilidad favorable.
 
 K-Means:
@@ -479,6 +491,7 @@ Ejecutar en este orden:
     .\venv\Scripts\python.exe src\spatial\igac_usos_pot.py --points-csv data\clean\base_municipios\municipios_distritos_colombia.csv
     .\venv\Scripts\python.exe src\extract\simem_api.py --include-f99e13
     .\venv\Scripts\python.exe src\extract\nasa_power.py
+    .\venv\Scripts\python.exe -m src.extract.costos_riesgos_municipales
     .\venv\Scripts\python.exe src\transform\solar_economics.py --no-figure
     .\venv\Scripts\python.exe src\scoring\xm_top10.py
     .\venv\Scripts\python.exe src\scoring\xm_demanda_municipal.py
@@ -620,7 +633,18 @@ Salida:
 
     data/clean/nasa_power/nasa_power_resumen_puntos.csv
 
-10. Economia solar por hectarea:
+10. Costos y riesgos municipales:
+
+    venv\Scripts\python.exe -m src.extract.costos_riesgos_municipales
+
+Salida:
+
+    data/clean/costos_riesgos_municipales/tierra_municipal.csv
+    data/clean/costos_riesgos_municipales/agua_municipal.csv
+    data/clean/costos_riesgos_municipales/viento_municipal.csv
+    data/clean/costos_riesgos_municipales/costos_riesgos_municipales.csv
+
+11. Economia solar por hectarea:
 
     venv\Scripts\python.exe src\transform\solar_economics.py --no-figure
 
@@ -629,7 +653,7 @@ Salida:
     data/clean/solar_costs/solar_escenarios_por_hectarea.csv
     data/clean/energy_prices/precios_compra_energia_minenergia_caribe.csv
 
-11. Resumen de demanda XM:
+12. Resumen de demanda XM:
 
     venv\Scripts\python.exe src\scoring\xm_top10.py
 
@@ -637,7 +661,7 @@ Salida:
 
     data/clean/xm_top10/xm_resumen_zonas.csv
 
-12. Proxy municipal de demanda:
+13. Proxy municipal de demanda:
 
     venv\Scripts\python.exe src\scoring\xm_demanda_municipal.py
 
@@ -645,7 +669,7 @@ Salida:
 
     data/clean/xm_demanda_municipal/xm_demanda_municipal_proxy.csv
 
-13. Score de viabilidad municipal:
+14. Score de viabilidad municipal:
 
     venv\Scripts\python.exe src\scoring\viabilidad_municipal.py
 
@@ -653,7 +677,7 @@ Salida:
 
     data/clean/viabilidad_municipal/viabilidad_municipal_preliminar.csv
 
-14. Agrupamiento K-Means:
+15. Agrupamiento K-Means:
 
     venv\Scripts\python.exe src\scoring\kmeans_municipios.py --auto-k --k-selection-metric elbow --random-seed 42
 
@@ -666,7 +690,7 @@ Salida:
     data/clean/clusters_municipios/grafico_metodo_codo_kmeans.png
     data/clean/clusters_municipios/grafico_silhouette_kmeans.png
 
-15. Visualizaciones:
+16. Visualizaciones:
 
     venv\Scripts\python.exe src\visualization\municipal_visualizations.py
 
@@ -674,7 +698,7 @@ Salida:
 
     data/clean/visualizaciones_municipios/
 
-16. Dashboard Streamlit:
+17. Dashboard Streamlit:
 
     venv\Scripts\streamlit.exe run streamlit_app.py
 

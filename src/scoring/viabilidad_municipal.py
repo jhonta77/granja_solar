@@ -24,6 +24,13 @@ DEFAULT_POT_PATH = (
 DEFAULT_DEMAND_PATH = (
     PROJECT_ROOT / "data" / "clean" / "xm_demanda_municipal" / "xm_demanda_municipal_proxy.csv"
 )
+DEFAULT_COSTS_RISKS_PATH = (
+    PROJECT_ROOT
+    / "data"
+    / "clean"
+    / "costos_riesgos_municipales"
+    / "costos_riesgos_municipales.csv"
+)
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "clean" / "viabilidad_municipal"
 
 
@@ -34,6 +41,15 @@ RURAL_WEIGHTS = {
     "w_u": 0.10,
 }
 DEMAND_BONUS_WEIGHT = 0.05
+ECONOMIC_CLIMATE_WEIGHTS = {
+    "s_i_solar": 0.30,
+    "g_i_red": 0.25,
+    "p_i_pendiente_proxy": 0.20,
+    "u_i_uso_suelo": 0.10,
+    "score_tierra": 0.08,
+    "score_agua": 0.04,
+    "score_riesgo_viento": 0.03,
+}
 
 PRELIMINARY_DISTANCE_LIMIT_KM = 50.0
 
@@ -89,9 +105,11 @@ def load_inputs(
     runap_path: Path | None,
     pot_path: Path | None,
     demand_path: Path | None,
+    costs_risks_path: Path | None,
 ) -> tuple[
     pd.DataFrame,
     pd.DataFrame,
+    pd.DataFrame | None,
     pd.DataFrame | None,
     pd.DataFrame | None,
     pd.DataFrame | None,
@@ -150,7 +168,44 @@ def load_inputs(
         if "codigo_dane" not in demand.columns:
             raise ValueError("Demanda XM municipal no tiene columna codigo_dane.")
         demand["codigo_dane"] = demand["codigo_dane"].astype("string").str.zfill(5)
-    return pvout, slope, grid_distance, runap, pot, demand
+
+    costs_risks = None
+    if costs_risks_path is not None and costs_risks_path.exists():
+        costs_risks = pd.read_csv(costs_risks_path, dtype={"codigo_dane": "string"})
+        if "codigo_dane" not in costs_risks.columns:
+            raise ValueError("Costos/riesgos municipales no tiene columna codigo_dane.")
+        costs_risks["codigo_dane"] = costs_risks["codigo_dane"].astype("string").str.zfill(5)
+    return pvout, slope, grid_distance, runap, pot, demand, costs_risks
+
+
+def impute_score_for_model(
+    df: pd.DataFrame,
+    score_column: str,
+    flag_column: str,
+) -> tuple[pd.Series, pd.Series]:
+    """Imputa scores faltantes con mediana departamental y luego nacional."""
+
+    values = pd.to_numeric(df[score_column], errors="coerce") if score_column in df.columns else pd.Series(pd.NA, index=df.index)
+    imputation = pd.Series("dato_observado", index=df.index, dtype="string")
+    missing = values.isna()
+    if flag_column in df.columns:
+        missing = missing | pd.to_numeric(df[flag_column], errors="coerce").fillna(0).eq(0)
+
+    if "departamento" in df.columns:
+        dept_median = values.groupby(df["departamento"]).transform("median")
+        dept_fill = missing & dept_median.notna()
+        values = values.where(~dept_fill, dept_median)
+        imputation.loc[dept_fill] = "mediana_departamental"
+        missing = values.isna()
+
+    national_median = values.median(skipna=True)
+    if pd.notna(national_median):
+        national_fill = missing
+        values = values.fillna(national_median)
+        imputation.loc[national_fill] = "mediana_nacional"
+    else:
+        imputation.loc[missing] = "sin_dato_para_imputar"
+    return values.clip(0, 1), imputation
 
 
 def build_preliminary_score(
@@ -160,6 +215,7 @@ def build_preliminary_score(
     runap: pd.DataFrame | None,
     pot: pd.DataFrame | None,
     demand: pd.DataFrame | None,
+    costs_risks: pd.DataFrame | None,
     distance_limit_km: float = PRELIMINARY_DISTANCE_LIMIT_KM,
 ) -> pd.DataFrame:
     """Construye tabla municipal preliminar con variables disponibles."""
@@ -302,6 +358,42 @@ def build_preliminary_score(
         result["flag_atipico_eda_demanda"] = 1
         result["tipo_mapeo_demanda"] = "sin_fuente_demanda"
 
+    if costs_risks is not None:
+        costs_columns = [
+            "codigo_dane",
+            "precio_tierra_ha_cop",
+            "score_tierra",
+            "tarifa_acueducto_m3_cop",
+            "score_agua",
+            "velocidad_viento_ms",
+            "velocidad_viento_max_ms",
+            "score_riesgo_viento",
+            "flag_dato_tierra",
+            "flag_dato_agua",
+            "flag_dato_viento",
+            "tipo_cruce_tierra",
+            "tipo_cruce_agua",
+            "tipo_cruce_viento",
+        ]
+        available_costs = [column for column in costs_columns if column in costs_risks.columns]
+        result = result.merge(
+            costs_risks[available_costs],
+            on="codigo_dane",
+            how="left",
+            validate="one_to_one",
+        )
+    else:
+        result["precio_tierra_ha_cop"] = pd.NA
+        result["score_tierra"] = pd.NA
+        result["tarifa_acueducto_m3_cop"] = pd.NA
+        result["score_agua"] = pd.NA
+        result["velocidad_viento_ms"] = pd.NA
+        result["velocidad_viento_max_ms"] = pd.NA
+        result["score_riesgo_viento"] = pd.NA
+        result["flag_dato_tierra"] = 0
+        result["flag_dato_agua"] = 0
+        result["flag_dato_viento"] = 0
+
     result["s_i_solar"] = minmax_score(result["pvout_kwh_kwp_day"], higher_is_better=True)
     result["p_i_pendiente_proxy"] = pd.to_numeric(result["score_pendiente"], errors="coerce")
     result["g_i_red"] = minmax_score(result["dist_subestacion_km"], higher_is_better=False)
@@ -387,6 +479,29 @@ def build_preliminary_score(
         result["v_i_modelo_rural"]
     )
 
+    for score_column, flag_column in [
+        ("score_tierra", "flag_dato_tierra"),
+        ("score_agua", "flag_dato_agua"),
+        ("score_riesgo_viento", "flag_dato_viento"),
+    ]:
+        result[score_column] = pd.to_numeric(result[score_column], errors="coerce")
+        result[f"{score_column}_modelo"], result[f"imputacion_{score_column}"] = impute_score_for_model(
+            result,
+            score_column,
+            flag_column,
+        )
+
+    economic_sum = sum(
+        pd.to_numeric(
+            result.get(f"{column}_modelo", result[column]),
+            errors="coerce",
+        ).fillna(0.0)
+        * weight
+        for column, weight in ECONOMIC_CLIMATE_WEIGHTS.items()
+        if column in result.columns
+    )
+    result["v_i_modelo_rural_economico_climatico"] = result["r_i_preliminar"] * economic_sum
+
     result["v_i_modelo_oficial"] = result["v_i_modelo_rural"]
     result["estado_modelo_oficial"] = (
         "modelo_rural_sin_demanda: demanda XM solo se reporta como factor favorable no determinante"
@@ -409,7 +524,8 @@ def build_preliminary_score(
     result["notas_metodologicas"] = (
         "Score preliminar usa PVOUT puntual municipal, distancia a subestacion UPME "
         "clase de pendiente IGAC en punto interno, proporcion no protegida RUNAP y POT si existe. "
-        "La demanda XM pron_areas no entra al V_i rural; se reporta como bono/contexto favorable."
+        "La demanda XM pron_areas no entra al V_i rural; se reporta como bono/contexto favorable. "
+        "El score economico-climatico agrega tierra, agua y viento con imputacion de medianas cuando faltan datos."
     )
 
     sort_columns = [
@@ -419,6 +535,10 @@ def build_preliminary_score(
         "g_i_red",
         "p_i_pendiente_proxy",
         "u_i_uso_suelo",
+        "v_i_modelo_rural_economico_climatico",
+        "score_tierra",
+        "score_agua",
+        "score_riesgo_viento",
         "d_i_demanda",
     ]
     return result.sort_values(sort_columns, ascending=False, na_position="last")
@@ -444,9 +564,15 @@ def write_observations(output_path: Path, scored: pd.DataFrame) -> None:
         "- Zonas urbanas POT: si el punto municipal cae en capa urbana, R_i = 0.",
         "- D_i demanda: disponible como proxy municipal desde subareas XM pron_areas, pero no entra al V_i rural.",
         "- V_i oficial: se exporta como v_i_modelo_rural; v_i_modelo_proxy_xm queda como alias compatible.",
+        "- T_i/A_i/W_i: tierra, agua y viento se integran en un score adicional economico-climatico.",
         "",
         "Score principal exportado:",
         "v_i_modelo_rural = R_preliminar * (0.35*S_i + 0.30*G_i + 0.25*P_i + 0.10*U_i)",
+        "",
+        "Score adicional economico-climatico:",
+        "v_i_modelo_rural_economico_climatico = R_i(0.30*S_i + 0.25*G_i + 0.20*P_i + 0.10*U_i + 0.08*T_i + 0.04*A_i + 0.03*W_i)",
+        "- T_i = score_tierra, A_i = score_agua, W_i = score_riesgo_viento.",
+        "- Si faltan T_i, A_i o W_i, el valor del modelo se imputa con mediana departamental y luego nacional.",
         "",
         "Demanda como factor favorable no determinante:",
         f"score_rural_con_bono_demanda = v_i_modelo_rural + ({DEMAND_BONUS_WEIGHT:.2f} * D_i * R_i)",
@@ -513,6 +639,7 @@ def run_scoring(
     runap_path: Path | None = DEFAULT_RUNAP_PATH,
     pot_path: Path | None = DEFAULT_POT_PATH,
     demand_path: Path | None = DEFAULT_DEMAND_PATH,
+    costs_risks_path: Path | None = DEFAULT_COSTS_RISKS_PATH,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     top_n: int = 10,
     distance_limit_km: float = PRELIMINARY_DISTANCE_LIMIT_KM,
@@ -520,13 +647,14 @@ def run_scoring(
     """Ejecuta scoring preliminar municipal."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    pvout, slope, grid_distance, runap, pot, demand = load_inputs(
+    pvout, slope, grid_distance, runap, pot, demand, costs_risks = load_inputs(
         pvout_path,
         slope_path,
         grid_distance_path,
         runap_path,
         pot_path,
         demand_path,
+        costs_risks_path,
     )
     scored = build_preliminary_score(
         pvout,
@@ -535,16 +663,24 @@ def run_scoring(
         runap,
         pot,
         demand,
+        costs_risks,
         distance_limit_km=distance_limit_km,
     )
 
     scored_path = output_dir / "viabilidad_municipal_preliminar.csv"
     top_path = output_dir / f"top{top_n}_modelo_rural_sin_demanda.csv"
+    top_economic_climate_path = output_dir / f"top{top_n}_modelo_rural_economico_climatico.csv"
     top_bonus_path = output_dir / f"top{top_n}_sensibilidad_demanda_favorable.csv"
     observations_path = output_dir / "observaciones_viabilidad_municipal.txt"
 
     scored.to_csv(scored_path, index=False, encoding="utf-8-sig")
     scored.head(top_n).to_csv(top_path, index=False, encoding="utf-8-sig")
+    (
+        scored.dropna(subset=["v_i_modelo_rural_economico_climatico"])
+        .sort_values("v_i_modelo_rural_economico_climatico", ascending=False)
+        .head(top_n)
+        .to_csv(top_economic_climate_path, index=False, encoding="utf-8-sig")
+    )
     (
         scored.dropna(subset=["score_rural_con_bono_demanda"])
         .sort_values("score_rural_con_bono_demanda", ascending=False)
@@ -556,6 +692,7 @@ def run_scoring(
     return {
         "scored": scored_path,
         "top": top_path,
+        "top_economico_climatico": top_economic_climate_path,
         "top_sensibilidad_demanda": top_bonus_path,
         "observations": observations_path,
     }
@@ -571,6 +708,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--runap-path", type=Path, default=DEFAULT_RUNAP_PATH)
     parser.add_argument("--pot-path", type=Path, default=DEFAULT_POT_PATH)
     parser.add_argument("--demand-path", type=Path, default=DEFAULT_DEMAND_PATH)
+    parser.add_argument("--costs-risks-path", type=Path, default=DEFAULT_COSTS_RISKS_PATH)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--top-n", type=int, default=10)
     parser.add_argument("--distance-limit-km", type=float, default=PRELIMINARY_DISTANCE_LIMIT_KM)
@@ -586,6 +724,7 @@ def main() -> int:
         runap_path=args.runap_path,
         pot_path=args.pot_path,
         demand_path=args.demand_path,
+        costs_risks_path=args.costs_risks_path,
         output_dir=args.output_dir,
         top_n=args.top_n,
         distance_limit_km=args.distance_limit_km,

@@ -912,7 +912,15 @@ def build_tables() -> list[TableSpec]:
             foreign_keys=[
                 ForeignKeySpec(["codigo_dane"], "municipios", ["codigo_dane"], "fk_viabilidad_municipio")
             ],
-            indexes=[["clasificacion_preliminar"], ["v_i_modelo_rural"]],
+            indexes=[
+                [column]
+                for column in [
+                    "clasificacion_preliminar",
+                    "v_i_modelo_rural",
+                    "v_i_modelo_rural_economico_climatico",
+                ]
+                if column in model_data["viabilidad_municipal"].columns
+            ],
             type_overrides={"codigo_dane": "CHAR(5)"},
         ),
         TableSpec(

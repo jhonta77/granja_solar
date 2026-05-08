@@ -83,11 +83,21 @@ plt.rcParams.update(
 )
 
 SCORE_COL = "v_i_modelo_rural"
+ECONOMIC_CLIMATE_SCORE_COL = "v_i_modelo_rural_economico_climatico"
 WEIGHTS = {
     "s_i_solar": 0.35,
     "g_i_red": 0.30,
     "p_i_pendiente_proxy": 0.25,
     "u_i_uso_suelo": 0.10,
+}
+ECONOMIC_CLIMATE_WEIGHTS = {
+    "s_i_solar": 0.30,
+    "g_i_red": 0.25,
+    "p_i_pendiente_proxy": 0.20,
+    "u_i_uso_suelo": 0.10,
+    "score_tierra_modelo": 0.08,
+    "score_agua_modelo": 0.04,
+    "score_riesgo_viento_modelo": 0.03,
 }
 COMPONENT_LABELS = {
     "s_i_solar": "Solar",
@@ -100,12 +110,22 @@ DISPLAY_COLUMNS = [
     "municipio",
     "departamento",
     SCORE_COL,
+    ECONOMIC_CLIMATE_SCORE_COL,
     "clasificacion_preliminar",
     "pvout_kwh_kwp_day",
     "annual_yield_kwh_kw_year",
     "dist_subestacion_km",
     "pendiente_igac",
     "pct_area_protegida_runap",
+    "precio_tierra_ha_cop",
+    "tarifa_acueducto_m3_cop",
+    "velocidad_viento_max_ms",
+    "score_tierra",
+    "score_agua",
+    "score_riesgo_viento",
+    "flag_dato_tierra",
+    "flag_dato_agua",
+    "flag_dato_viento",
     "tipo_capa_pot",
     "categoria_aptitud_pot",
     "uso_pot",
@@ -337,6 +357,34 @@ GLOSSARY_ROWS = [
     },
     {
         "grupo": "Score",
+        "variable": "v_i_modelo_rural_economico_climatico",
+        "significado": "Score adicional que incorpora tierra, agua y viento.",
+        "lectura": "Permite comparar el ranking tecnico con una sensibilidad economica y climatica.",
+        "uso_modelo": "Score adicional",
+    },
+    {
+        "grupo": "Costos",
+        "variable": "precio_tierra_ha_cop",
+        "significado": "Precio comercial rural por hectarea en COP.",
+        "lectura": "Menor precio favorece el score economico-climatico.",
+        "uso_modelo": "Entrada de T_i",
+    },
+    {
+        "grupo": "Costos",
+        "variable": "tarifa_acueducto_m3_cop",
+        "significado": "Tarifa variable de acueducto aproximada en COP/m3.",
+        "lectura": "Menor tarifa favorece el score economico-climatico.",
+        "uso_modelo": "Entrada de A_i",
+    },
+    {
+        "grupo": "Clima",
+        "variable": "velocidad_viento_max_ms",
+        "significado": "Maximo municipal observado de velocidad de viento IDEAM.",
+        "lectura": "Menor valor reduce el proxy de riesgo por viento fuerte.",
+        "uso_modelo": "Entrada de W_i",
+    },
+    {
+        "grupo": "Score",
         "variable": "score_rural_con_bono_demanda",
         "significado": "Score rural mas bono de demanda favorable.",
         "lectura": "Sirve como sensibilidad; no reemplaza V_i rural.",
@@ -483,6 +531,7 @@ def load_viability() -> pd.DataFrame:
 
     numeric_cols = [
         SCORE_COL,
+        ECONOMIC_CLIMATE_SCORE_COL,
         "v_i_modelo_oficial",
         "v_i_modelo_proxy_xm",
         "score_preliminar_solar_red_pendiente_runap",
@@ -501,6 +550,19 @@ def load_viability() -> pd.DataFrame:
         "flag_revision_demanda",
         "demanda_xm_proxy_mwh_o_unidad_fuente",
         "d_i_demanda",
+        "precio_tierra_ha_cop",
+        "score_tierra",
+        "score_tierra_modelo",
+        "tarifa_acueducto_m3_cop",
+        "score_agua",
+        "score_agua_modelo",
+        "velocidad_viento_ms",
+        "velocidad_viento_max_ms",
+        "score_riesgo_viento",
+        "score_riesgo_viento_modelo",
+        "flag_dato_tierra",
+        "flag_dato_agua",
+        "flag_dato_viento",
         *WEIGHTS.keys(),
     ]
     for column in numeric_cols:
@@ -766,7 +828,13 @@ def filter_data(
 
 
 def top_municipalities(df: pd.DataFrame, n: int) -> pd.DataFrame:
-    top = df.dropna(subset=[SCORE_COL]).sort_values(SCORE_COL, ascending=False).head(n).copy()
+    return top_municipalities_by_score(df, n, SCORE_COL)
+
+
+def top_municipalities_by_score(df: pd.DataFrame, n: int, score_column: str) -> pd.DataFrame:
+    if score_column not in df.columns:
+        return pd.DataFrame()
+    top = df.dropna(subset=[score_column]).sort_values(score_column, ascending=False).head(n).copy()
     top.insert(0, "ranking", range(1, len(top) + 1))
     return top
 
@@ -776,6 +844,7 @@ def format_table(df: pd.DataFrame) -> pd.DataFrame:
     table = df[available].copy()
     rename = {
         SCORE_COL: "score_rural",
+        ECONOMIC_CLIMATE_SCORE_COL: "score_economico_climatico",
         "pvout_kwh_kwp_day": "pvout_kwh_kwp_dia",
         "annual_yield_kwh_kw_year": "kwh_kw_anio",
         "dist_subestacion_km": "dist_red_km",
@@ -802,6 +871,99 @@ def make_top_score_chart(top: pd.DataFrame) -> plt.Figure:
     ax.set_xlabel("Score V_i rural")
     ax.set_title("Top municipios por viabilidad rural")
     ax.set_xlim(0, 1)
+    fig.tight_layout(pad=0.7)
+    return fig
+
+
+def make_score_chart(top: pd.DataFrame, score_column: str, title: str, xlabel: str) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=scaled_figsize(10, max(4, 0.45 * len(top))), dpi=FIGURE_DPI)
+    if top.empty or score_column not in top.columns:
+        ax.text(0.5, 0.5, "Sin datos suficientes", ha="center", va="center")
+        ax.axis("off")
+        return fig
+    data = top.sort_values(score_column, ascending=True)
+    labels = data["municipio"].astype(str) + " (" + data["departamento"].astype(str) + ")"
+    ax.barh(labels, data[score_column])
+    ax.set_xlabel(xlabel)
+    ax.set_title(title)
+    ax.set_xlim(0, 1)
+    fig.tight_layout(pad=0.7)
+    return fig
+
+
+def make_ranking_comparison(df: pd.DataFrame, n: int) -> pd.DataFrame:
+    required = [SCORE_COL, ECONOMIC_CLIMATE_SCORE_COL]
+    if any(column not in df.columns for column in required):
+        return pd.DataFrame()
+    working = df.dropna(subset=required).copy()
+    working["ranking_original"] = working[SCORE_COL].rank(ascending=False, method="min")
+    working["ranking_economico_climatico"] = working[ECONOMIC_CLIMATE_SCORE_COL].rank(
+        ascending=False,
+        method="min",
+    )
+    working["cambio_ranking"] = working["ranking_original"] - working["ranking_economico_climatico"]
+    keep = [
+        "codigo_dane",
+        "municipio",
+        "departamento",
+        SCORE_COL,
+        ECONOMIC_CLIMATE_SCORE_COL,
+        "ranking_original",
+        "ranking_economico_climatico",
+        "cambio_ranking",
+        "precio_tierra_ha_cop",
+        "tarifa_acueducto_m3_cop",
+        "velocidad_viento_max_ms",
+    ]
+    return working.sort_values("ranking_economico_climatico").head(n)[
+        [column for column in keep if column in working.columns]
+    ]
+
+
+def make_low_land_cost_chart(df: pd.DataFrame, n: int) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=scaled_figsize(10, max(4, 0.45 * n)), dpi=FIGURE_DPI)
+    if "precio_tierra_ha_cop" not in df.columns:
+        ax.text(0.5, 0.5, "Sin datos de tierra", ha="center", va="center")
+        ax.axis("off")
+        return fig
+    data = (
+        df.dropna(subset=["precio_tierra_ha_cop"])
+        .sort_values("precio_tierra_ha_cop", ascending=True)
+        .head(n)
+        .sort_values("precio_tierra_ha_cop", ascending=False)
+    )
+    if data.empty:
+        ax.text(0.5, 0.5, "Sin datos de tierra", ha="center", va="center")
+        ax.axis("off")
+        return fig
+    labels = data["municipio"].astype(str) + " (" + data["departamento"].astype(str) + ")"
+    ax.barh(labels, data["precio_tierra_ha_cop"] / 1_000_000)
+    ax.set_xlabel("Millones COP/ha")
+    ax.set_title("Menor costo de tierra rural")
+    fig.tight_layout(pad=0.7)
+    return fig
+
+
+def make_wind_risk_chart(df: pd.DataFrame, n: int) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=scaled_figsize(10, max(4, 0.45 * n)), dpi=FIGURE_DPI)
+    if "velocidad_viento_max_ms" not in df.columns:
+        ax.text(0.5, 0.5, "Sin datos de viento", ha="center", va="center")
+        ax.axis("off")
+        return fig
+    data = (
+        df.dropna(subset=["velocidad_viento_max_ms"])
+        .sort_values("velocidad_viento_max_ms", ascending=False)
+        .head(n)
+        .sort_values("velocidad_viento_max_ms", ascending=True)
+    )
+    if data.empty:
+        ax.text(0.5, 0.5, "Sin datos de viento", ha="center", va="center")
+        ax.axis("off")
+        return fig
+    labels = data["municipio"].astype(str) + " (" + data["departamento"].astype(str) + ")"
+    ax.barh(labels, data["velocidad_viento_max_ms"])
+    ax.set_xlabel("m/s")
+    ax.set_title("Mayor velocidad maxima de viento observada")
     fig.tight_layout(pad=0.7)
     return fig
 
@@ -1478,6 +1640,11 @@ def main() -> None:
 
     filtered = filter_data(df, departments, hide_outliers, only_eligible)
     top = top_municipalities(filtered, top_n)
+    top_economic_climate = top_municipalities_by_score(
+        filtered,
+        top_n,
+        ECONOMIC_CLIMATE_SCORE_COL,
+    )
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Municipios base", f"{len(df):,}")
@@ -1496,6 +1663,7 @@ def main() -> None:
 
     (
         tab_top,
+        tab_economic_climate,
         tab_explain,
         tab_map,
         tab_clusters,
@@ -1507,6 +1675,7 @@ def main() -> None:
     ) = st.tabs(
         [
             "Top municipios",
+            "Economico-climatico",
             "Por que aparecen",
             "Mapa",
             "Clusters",
@@ -1526,6 +1695,73 @@ def main() -> None:
             use_container_width=True,
             hide_index=True,
         )
+
+    with tab_economic_climate:
+        st.subheader("Ranking economico-climatico")
+        st.caption(
+            "Este ranking no reemplaza el V_i rural; agrega tierra, agua y viento como sensibilidad adicional."
+        )
+        st.code(
+            "V_i = R_i(0.30*S_i + 0.25*G_i + 0.20*P_i + 0.10*U_i + 0.08*T_i + 0.04*A_i + 0.03*W_i)"
+        )
+        left, right = st.columns(2)
+        with left:
+            render_chart(
+                make_score_chart(
+                    top,
+                    SCORE_COL,
+                    "Ranking original",
+                    "V_i rural",
+                )
+            )
+        with right:
+            render_chart(
+                make_score_chart(
+                    top_economic_climate,
+                    ECONOMIC_CLIMATE_SCORE_COL,
+                    "Ranking economico-climatico",
+                    "V_i economico-climatico",
+                )
+            )
+
+        comparison = make_ranking_comparison(filtered, top_n)
+        if comparison.empty:
+            st.warning("No hay datos suficientes para comparar rankings.")
+        else:
+            st.markdown("**Comparacion entre rankings**")
+            st.dataframe(comparison, use_container_width=True, hide_index=True)
+
+        st.markdown("**Tierra, agua y viento**")
+        cost_columns = [
+            "ranking",
+            "municipio",
+            "departamento",
+            ECONOMIC_CLIMATE_SCORE_COL,
+            "precio_tierra_ha_cop",
+            "score_tierra",
+            "score_tierra_modelo",
+            "tarifa_acueducto_m3_cop",
+            "score_agua",
+            "score_agua_modelo",
+            "velocidad_viento_ms",
+            "velocidad_viento_max_ms",
+            "score_riesgo_viento",
+            "score_riesgo_viento_modelo",
+            "flag_dato_tierra",
+            "flag_dato_agua",
+            "flag_dato_viento",
+        ]
+        st.dataframe(
+            top_economic_climate[[column for column in cost_columns if column in top_economic_climate.columns]],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        chart_left, chart_right = st.columns(2)
+        with chart_left:
+            render_chart(make_low_land_cost_chart(filtered, top_n))
+        with chart_right:
+            render_chart(make_wind_risk_chart(filtered, top_n))
 
     with tab_explain:
         st.subheader("Explicacion del score")
