@@ -188,43 +188,96 @@ def power_json_to_daily_df(
     return pd.DataFrame(rows)
 
 
-def summarize_points(daily_df: pd.DataFrame) -> pd.DataFrame:
-    """Resume radiacion solar diaria por punto."""
+_RADIATION_COLUMNS = {"allsky_sfc_sw_dwn", "clrsky_sfc_sw_dwn"}
+_METADATA_COLUMNS = {"punto_id", "codigo_dane", "municipio", "departamento", "lon", "lat", "fecha"}
+
+_PARAM_AGGREGATIONS: dict[str, list[str]] = {
+    "allsky_sfc_sw_dwn": ["dias_validos", "media_kwh_m2_day", "mediana_kwh_m2_day", "p95_kwh_m2_day", "suma_kwh_m2_year"],
+    "clrsky_sfc_sw_dwn": ["dias_validos", "media_kwh_m2_day", "mediana_kwh_m2_day", "p95_kwh_m2_day", "suma_kwh_m2_year"],
+    "t2m":              ["dias_validos", "media", "min", "max"],
+    "cloud_amt":        ["dias_validos", "media", "mediana"],
+    "ws10m":            ["dias_validos", "media", "max"],
+    "prectotcorr":      ["dias_validos", "media_mm_day", "suma_mm_year"],
+}
+
+
+def _aggregate_column(values: pd.Series, column: str) -> dict[str, Any]:
+    """Aplica las agregaciones correspondientes a cada parametro NASA POWER."""
+
+    aggs = _PARAM_AGGREGATIONS.get(column, ["dias_validos", "media"])
+    row: dict[str, Any] = {}
+    for agg in aggs:
+        if agg == "dias_validos":
+            row[f"{column}_dias_validos"] = int(values.shape[0])
+        elif agg.startswith("media"):
+            suffix = agg[len("media"):]
+            row[f"{column}_media{suffix}"] = values.mean()
+        elif agg == "mediana":
+            row[f"{column}_mediana"] = values.median()
+        elif agg.startswith("mediana"):
+            suffix = agg[len("mediana"):]
+            row[f"{column}_mediana{suffix}"] = values.median()
+        elif agg.startswith("p"):
+            try:
+                pct = int(agg[1:]) / 100
+                suffix = agg[len("p"):] if not agg[1:].isdigit() else ""
+                label = f"{column}_{agg}"
+                if suffix:
+                    label = f"{column}_p{agg[1:]}"
+                row[label] = values.quantile(pct)
+            except ValueError:
+                pass
+        elif agg.startswith("suma"):
+            suffix = agg[len("suma"):]
+            row[f"{column}_suma{suffix}"] = values.sum()
+        elif agg == "min":
+            row[f"{column}_min"] = values.min()
+        elif agg == "max":
+            row[f"{column}_max"] = values.max()
+    return row
+
+
+def summarize_points(daily_df: pd.DataFrame, group_key: str = "punto_id") -> pd.DataFrame:
+    """Resume variables NASA POWER diarias por punto o por municipio.
+
+    Acepta cualquier parametro presente en el DataFrame: detecta automaticamente
+    las columnas de valor (numericas no-metadata) y aplica las agregaciones
+    definidas en _PARAM_AGGREGATIONS. Los parametros sin entrada especifica usan
+    media como unica agregacion.
+    """
 
     if daily_df.empty:
         return pd.DataFrame()
 
+    id_columns = [
+        column
+        for column in [group_key, "municipio", "departamento", "codigo_dane", "lon", "lat"]
+        if column in daily_df.columns
+    ]
+    if group_key not in id_columns:
+        id_columns.insert(0, group_key)
+
     value_columns = [
         column
         for column in daily_df.columns
-        if column in {"allsky_sfc_sw_dwn", "clrsky_sfc_sw_dwn"}
+        if column not in _METADATA_COLUMNS and pd.api.types.is_numeric_dtype(daily_df[column])
     ]
-    id_columns = [
-        column
-        for column in ["punto_id", "municipio", "departamento", "lon", "lat"]
-        if column in daily_df.columns
-    ]
-    if "punto_id" not in id_columns:
-        id_columns.insert(0, "punto_id")
 
     summaries: list[pd.DataFrame] = []
-    for point_id, group in daily_df.groupby("punto_id", dropna=False):
-        row: dict[str, Any] = {"punto_id": point_id, "dias_validos": len(group)}
+    for point_id, group in daily_df.groupby(group_key, dropna=False):
+        row: dict[str, Any] = {group_key: point_id, "dias_validos": len(group)}
         for column in id_columns:
-            if column in group.columns:
+            if column in group.columns and column != group_key:
                 row[column] = group[column].iloc[0]
         for column in value_columns:
             values = pd.to_numeric(group[column], errors="coerce").dropna()
-            row[f"{column}_dias_validos"] = int(values.shape[0])
-            row[f"{column}_media_kwh_m2_day"] = values.mean()
-            row[f"{column}_mediana_kwh_m2_day"] = values.median()
-            row[f"{column}_p95_kwh_m2_day"] = values.quantile(0.95)
-            row[f"{column}_suma_kwh_m2_year"] = values.sum()
+            row.update(_aggregate_column(values, column))
         summaries.append(pd.DataFrame([row]))
 
     result = pd.concat(summaries, ignore_index=True)
-    if "allsky_sfc_sw_dwn_media_kwh_m2_day" in result.columns:
-        result = result.sort_values("allsky_sfc_sw_dwn_media_kwh_m2_day", ascending=False)
+    sort_col = "allsky_sfc_sw_dwn_media_kwh_m2_day"
+    if sort_col in result.columns:
+        result = result.sort_values(sort_col, ascending=False)
     return result
 
 
