@@ -1,5 +1,6 @@
 """Dashboard de viabilidad solar municipal — Modelo agrivoltaico Colombia."""
 
+import os
 from pathlib import Path
 
 import matplotlib
@@ -11,7 +12,7 @@ import streamlit as st
 matplotlib.use("Agg")
 
 # ---------------------------------------------------------------------------
-# Rutas
+# Rutas y conexion
 # ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent
 MULTIDIM_PATH = (
@@ -19,6 +20,22 @@ MULTIDIM_PATH = (
     / "data" / "clean" / "viabilidad_municipal"
     / "viabilidad_municipal_multidimensional.csv"
 )
+
+# Carga .env si existe para tener credenciales MySQL disponibles
+try:
+    from dotenv import load_dotenv
+    load_dotenv(PROJECT_ROOT / ".env")
+except ImportError:
+    pass
+
+MYSQL_CONFIG = {
+    "host":     os.getenv("MYSQL_HOST", "127.0.0.1"),
+    "port":     int(os.getenv("MYSQL_PORT", "3306")),
+    "user":     os.getenv("MYSQL_USER", ""),
+    "password": os.getenv("MYSQL_PASSWORD", ""),
+    "database": os.getenv("MYSQL_DATABASE", "granja_solar"),
+}
+MYSQL_TABLE = "viabilidad_multidimensional"
 
 # ---------------------------------------------------------------------------
 # Constantes de scoring
@@ -84,12 +101,51 @@ TOTAL_VARS = {
 
 
 # ---------------------------------------------------------------------------
-# Carga de datos
+# Carga de datos — MySQL primero, CSV como fallback
 # ---------------------------------------------------------------------------
+def _load_from_mysql() -> pd.DataFrame | None:
+    """Lee la tabla `viabilidad_multidimensional` de MySQL. Devuelve None si falla."""
+    if not MYSQL_CONFIG["user"]:
+        return None
+    try:
+        import mysql.connector
+        from mysql.connector import Error as MySQLError
+    except ImportError:
+        return None
+    try:
+        conn = mysql.connector.connect(connection_timeout=5, **MYSQL_CONFIG)
+        try:
+            df = pd.read_sql(f"SELECT * FROM `{MYSQL_TABLE}`", conn)
+        finally:
+            conn.close()
+        if df.empty:
+            return None
+        if "codigo_dane" in df.columns:
+            df["codigo_dane"] = df["codigo_dane"].astype("string")
+        return df
+    except (MySQLError, Exception):
+        return None
+
+
 @st.cache_data(show_spinner=False)
-def load_data() -> pd.DataFrame:
-    df = pd.read_csv(MULTIDIM_PATH, dtype={"codigo_dane": "string"})
-    return df.sort_values("v_i_multidimensional", ascending=False).reset_index(drop=True)
+def load_data() -> tuple[pd.DataFrame, str]:
+    """Carga datos del scoring multidimensional. Prioridad: MySQL → CSV.
+
+    Returns:
+        (DataFrame, fuente) donde fuente es "mysql" o "csv"
+    """
+    df = _load_from_mysql()
+    fuente = "mysql"
+    if df is None:
+        if not MULTIDIM_PATH.exists():
+            raise FileNotFoundError(
+                f"No hay datos disponibles. Verifica:\n"
+                f"  1. Conexion MySQL (.env con MYSQL_USER/MYSQL_PASSWORD) o\n"
+                f"  2. Archivo CSV en {MULTIDIM_PATH}"
+            )
+        df = pd.read_csv(MULTIDIM_PATH, dtype={"codigo_dane": "string"})
+        fuente = "csv"
+    return df.sort_values("v_i_multidimensional", ascending=False).reset_index(drop=True), fuente
 
 
 # ---------------------------------------------------------------------------
@@ -1685,12 +1741,28 @@ def main() -> None:
     st.title("☀️ Viabilidad Solar Agrivoltaica — Colombia")
     st.caption("Modelo multidimensional: Fisico (30%) · Electrico (25%) · Economico (20%) · Agropecuario (15%) · Riesgo (10%)")
 
-    if not MULTIDIM_PATH.exists():
-        st.error(f"No se encontro el archivo de scores: {MULTIDIM_PATH}")
-        st.info("Ejecuta primero: `python -m src.scoring.viabilidad_municipal`")
+    try:
+        df, fuente = load_data()
+    except FileNotFoundError as exc:
+        st.error(str(exc))
+        st.info(
+            "Para llenar la base de datos: `python -m src.db.mysql_loader --apply`\n"
+            "Para regenerar el CSV: `python -m src.scoring.viabilidad_municipal`"
+        )
         st.stop()
 
-    df = load_data()
+    # Badge discreto de la fuente activa
+    if fuente == "mysql":
+        st.caption(
+            f"📡 Datos en vivo desde MySQL (`{MYSQL_CONFIG['database']}.{MYSQL_TABLE}`) — "
+            f"{len(df):,} municipios"
+        )
+    else:
+        st.caption(
+            f"📁 Datos desde CSV ({MULTIDIM_PATH.name}) — {len(df):,} municipios. "
+            f"Configura `.env` con credenciales MySQL para leer de la base de datos."
+        )
+
     top5 = df.head(5).reset_index(drop=True)
     numero1 = top5.iloc[0]
 

@@ -192,12 +192,33 @@ python -m src.scoring.kmeans_municipios --auto-k --random-seed 42
 # Visualizaciones
 python -m src.visualization.municipal_visualizations
 
-# (Opcional) Cargar a MySQL
+# Cargar a MySQL (recomendado para evitar persistencia de CSV)
 python -m src.db.mysql_loader --apply
 
-# Dashboard
+# Dashboard (lee de MySQL si esta disponible, sino del CSV)
 streamlit run streamlit_app.py
 ```
+
+### 6.5 Modo solo-MySQL (eliminar CSV intermedios)
+
+Una vez cargada la base de datos, el dashboard lee directamente de MySQL.
+Puedes eliminar los CSV intermedios para liberar espacio:
+
+```bash
+# 1. Confirma que MySQL tiene la tabla cargada
+python -c "import os; from dotenv import load_dotenv; load_dotenv(); import mysql.connector; c=mysql.connector.connect(host=os.environ['MYSQL_HOST'], user=os.environ['MYSQL_USER'], password=os.environ['MYSQL_PASSWORD'], database=os.environ['MYSQL_DATABASE']); cur=c.cursor(); cur.execute('SELECT COUNT(*) FROM viabilidad_multidimensional'); print('Filas en MySQL:', cur.fetchone()[0])"
+
+# 2. Si el conteo es ~1104, ya puedes borrar los CSV intermedios:
+rm -rf data/clean/pvout_municipios data/clean/pendientes_municipios data/clean/nasa_power data/clean/copernicus_era5 data/clean/ideam_riesgo data/clean/invias_vias data/clean/sui_aseo data/clean/upra_agropecuario data/clean/runap_protegidas data/clean/subestaciones_upme
+
+# 3. NO borrar:
+#    - data/raw/         (insumos manuales, irrecuperables)
+#    - data/clean/viabilidad_municipal/   (necesario como fallback si MySQL cae)
+#    - data/clean/base_municipios/        (necesario para regenerar pipeline)
+```
+
+El dashboard mostrara `📡 Datos en vivo desde MySQL` cuando lee de la base
+y `📁 Datos desde CSV` cuando hace fallback.
 
 
 ## 7. Salidas principales
