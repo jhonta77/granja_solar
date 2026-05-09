@@ -1146,8 +1146,12 @@ def _viabilidad_financiera(row: "pd.Series", params: dict) -> dict:
     del area de paneles (proyecto agrivoltaico), no en toda el area viable.
     """
     def _safe(val, default: float = 0.0) -> float:
-        """Convierte a float ignorando NaN (nan or X devuelve nan en Python)."""
+        """Convierte a float ignorando NaN. Tolera Series (toma primer elemento)."""
+        if isinstance(val, pd.Series):
+            val = val.iloc[0] if len(val) > 0 else default
         v = pd.to_numeric(val, errors="coerce")
+        if isinstance(v, pd.Series):
+            v = v.iloc[0] if len(v) > 0 else float("nan")
         return float(v) if pd.notna(v) else float(default)
 
     ha_viable_total = _safe(row.get("ha_viable", 0), 0.0)
@@ -1384,17 +1388,20 @@ def render_viabilidad_financiera_tab(df: pd.DataFrame, top5: pd.DataFrame) -> No
         "ha_por_mw": ha_por_mw,
         "tarifa_agua_default": tarifa_agua_default,
     })
-    agro_base = agro_base.set_index("municipio")
+    # Dedupe por municipio (puede haber nombres repetidos en distintos departamentos)
+    agro_base = agro_base.drop_duplicates(subset=["municipio"]).set_index("municipio")
 
     if mun_sel not in agro_base.index:
         st.warning("Municipio sin datos suficientes.")
         return
 
-    # Combinar datos del CSV con los del calculo agro
-    row_agro = agro_base.loc[mun_sel]
-    row_orig = df[df["municipio"] == mun_sel].iloc[0] if not df[df["municipio"] == mun_sel].empty else row_agro
+    # Combinar datos del CSV con los del calculo agro — siempre como Series escalar
+    row_agro_raw = agro_base.loc[mun_sel]
+    row_agro = row_agro_raw.iloc[0] if isinstance(row_agro_raw, pd.DataFrame) else row_agro_raw
+    matches_orig = df[df["municipio"] == mun_sel]
+    row_orig = matches_orig.iloc[0] if not matches_orig.empty else row_agro
     row_combined = row_orig.copy()
-    row_combined["ha_viable"] = row_agro["ha_viable"]
+    row_combined["ha_viable"] = float(pd.to_numeric(row_agro["ha_viable"], errors="coerce") or 0)
 
     f = _viabilidad_financiera(row_combined, params)
 
