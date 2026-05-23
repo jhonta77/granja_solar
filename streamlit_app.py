@@ -1783,6 +1783,157 @@ def render_viabilidad_financiera_tab(df: pd.DataFrame, top5: pd.DataFrame) -> No
 
 
 # ---------------------------------------------------------------------------
+# Pestaña rentabilidad — helpers DCF
+# ---------------------------------------------------------------------------
+
+def _crf_val(wacc: float, n: int) -> float:
+    """Factor de recuperacion de capital."""
+    if wacc == 0:
+        return 1 / n
+    return wacc / (1 - (1 + wacc) ** -n)
+
+
+def _calcular_dcf(row: pd.Series, ppa: float) -> dict:
+    """Flujo de caja real año por año (modelo equity: CAPEX en año 0, sin deuda).
+
+    - Año 0: desembolso total (CAPEX paneles + linea de interconexion).
+    - Años 1-N: Ingreso_energia − Costos_operativos (OPEX + agua + agro + riesgo + logistica).
+    - La generacion decrece 0.5%/año por degradacion de los paneles.
+    """
+    wacc = float(row.get("supuesto_wacc", 0.08) or 0.08)
+    n    = int(row.get("supuesto_vida_util_anios", 25) or 25)
+    capex_ha = float(row.get("supuesto_capex_cop_ha", 0) or 0)
+
+    # Revertir la anualizacion del CRF para obtener el costo capital original
+    crf = _crf_val(wacc, n)
+    intercon_anual = float(row.get("costo_interconexion_cop_ha_year", 0) or 0)
+    intercon_capex_ha = intercon_anual / crf if crf > 0 else 0
+
+    inversion_ha = capex_ha + intercon_capex_ha  # desembolso año 0
+
+    # Costos operativos anuales (fijos, no incluyen CAPEX)
+    opex_ha     = float(row.get("costo_opex_cop_ha_year", 0) or 0)
+    agua_ha     = float(row.get("costo_agua_limpieza_cop_ha_year", 0) or 0)
+    agro_ha     = float(row.get("costo_oportunidad_agro_cop_ha_year", 0) or 0)
+    riesgo_ha   = float(row.get("costo_riesgo_climatico_cop_ha_year", 0) or 0)
+    logistica_ha= float(row.get("costo_logistica_vias_cop_ha_year", 0) or 0)
+    costos_op   = opex_ha + agua_ha + agro_ha + riesgo_ha + logistica_ha
+
+    generacion_y1 = float(row.get("generacion_kwh_ha_year", 0) or 0)
+
+    flujos, acumulados = [-inversion_ha], [-inversion_ha]
+    for t in range(1, n + 1):
+        degradacion = (1 - 0.005) ** t          # -0.5%/año
+        ingreso_t   = generacion_y1 * degradacion * ppa
+        flujo_t     = ingreso_t - costos_op
+        flujos.append(flujo_t)
+        acumulados.append(acumulados[-1] + flujo_t)
+
+    # NPV (VPN)
+    npv = sum(f / (1 + wacc) ** t for t, f in enumerate(flujos))
+
+    # Payback (año en que flujo acumulado cruza 0)
+    payback = next((t for t, a in enumerate(acumulados) if a >= 0), None)
+
+    # TIR (biseccion numerica)
+    irr = None
+    try:
+        def _npv_r(r):
+            return sum(f / (1 + r) ** t for t, f in enumerate(flujos))
+        if _npv_r(0) > 0:   # proyecto tiene al menos NPV>0 sin descuento
+            lo, hi = -0.99, 10.0
+            for _ in range(120):
+                mid = (lo + hi) / 2
+                if _npv_r(mid) > 0:
+                    lo = mid
+                else:
+                    hi = mid
+            irr = (lo + hi) / 2
+    except Exception:
+        pass
+
+    return {
+        "flujos": flujos,
+        "acumulados": acumulados,
+        "inversion_ha": inversion_ha,
+        "npv": npv,
+        "irr": irr,
+        "payback": payback,
+        "n": n,
+        "wacc": wacc,
+    }
+
+
+def _chart_flujo_caja(dcf: dict, municipio: str, ppa: float):
+    """Barras de flujo neto anual + linea de flujo acumulado."""
+    import plotly.graph_objects as go
+
+    n       = dcf["n"]
+    años    = list(range(n + 1))
+    flujos  = [f / 1e6 for f in dcf["flujos"]]
+    acum    = [a / 1e6 for a in dcf["acumulados"]]
+    payback = dcf["payback"]
+
+    colores_bar = ["#EF4444" if f < 0 else "#16A34A" for f in flujos]
+
+    fig = go.Figure()
+
+    # Barras flujo anual
+    fig.add_trace(go.Bar(
+        x=años, y=flujos,
+        name="Flujo neto anual",
+        marker_color=colores_bar,
+        opacity=0.80,
+        hovertemplate="Año %{x}<br>Flujo neto: %{y:.2f} M COP/ha<extra></extra>",
+    ))
+
+    # Linea flujo acumulado
+    fig.add_trace(go.Scatter(
+        x=años, y=acum,
+        name="Flujo acumulado",
+        mode="lines+markers",
+        line=dict(color="#2563EB", width=2.5),
+        marker=dict(size=4),
+        hovertemplate="Año %{x}<br>Acumulado: %{y:.2f} M COP/ha<extra></extra>",
+    ))
+
+    # Linea de payback
+    if payback is not None:
+        fig.add_vline(
+            x=payback,
+            line=dict(color="#D97706", width=2.5, dash="dash"),
+            annotation_text=f"  Payback: año {payback}",
+            annotation_position="top right",
+            annotation_font=dict(size=13, color="#D97706"),
+        )
+
+    # Linea cero
+    fig.add_hline(y=0, line=dict(color="#6B7280", width=1))
+
+    fig.update_layout(
+        title=dict(
+            text=f"Flujo de caja real — {municipio}  (PPA = {ppa} COP/kWh, sin deuda)",
+            font=dict(size=14, color="#111827", family="Arial"),
+            x=0.5,
+        ),
+        xaxis=dict(
+            title="Año del proyecto",
+            tickmode="linear", dtick=2,
+            gridcolor="#E5E7EB",
+        ),
+        yaxis=dict(title="M COP / ha", gridcolor="#E5E7EB"),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        height=420,
+        margin=dict(l=10, r=10, t=55, b=50),
+        legend=dict(orientation="h", y=-0.15, x=0.5, xanchor="center"),
+        barmode="overlay",
+    )
+    _apply_readable_fonts(fig)
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # Pestaña rentabilidad
 # ---------------------------------------------------------------------------
 _RENT_COST_LABELS = {
@@ -2161,6 +2312,76 @@ def render_rentabilidad_tab(df_r: pd.DataFrame) -> None:
             "El CAPEX se anualiza con el factor de recuperacion de capital (CRF = WACC / (1-(1+WACC)^-n)). "
             "El costo de interconexion se prorratea entre el area del proyecto."
         )
+
+    st.divider()
+
+    # ── Análisis financiero temporal (DCF real) ───────────────────────────────
+    st.markdown("### Análisis financiero real — flujo de caja año a año")
+    st.caption(
+        "El modelo anterior reparte el CAPEX uniformemente con CRF (como una cuota fija de crédito). "
+        "Aquí se calcula el **flujo real**: el CAPEX se paga completo en el **Año 0**, "
+        "y los años siguientes solo tienen costos operativos. "
+        "Así se ve cuándo el proyecto recupera la inversión y cuál es la TIR real."
+    )
+
+    ppa_slider = st.slider(
+        "Ajusta el PPA — precio de venta de energía (COP/kWh)",
+        min_value=120, max_value=320, value=160, step=10,
+        help="El modelo base usa 160 COP/kWh (conservador). PPAs reales en Colombia 2024: 180–260 COP/kWh para contratos bilaterales solares.",
+        key="rent_ppa_slider",
+    )
+
+    dcf = _calcular_dcf(row_sel, ppa=float(ppa_slider))
+
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric(
+        "Inversión inicial (Año 0)",
+        f"{dcf['inversion_ha']/1e6:.1f} M COP/ha",
+        help="CAPEX paneles + línea de interconexión. Desembolso único al inicio.",
+    )
+    d2.metric(
+        "VPN (NPV)",
+        f"{dcf['npv']/1e6:.1f} M COP/ha",
+        delta="proyecto rentable" if dcf["npv"] > 0 else "proyecto no rentable",
+        delta_color="normal" if dcf["npv"] > 0 else "inverse",
+        help=f"Valor presente de todos los flujos futuros descontados al WACC={dcf['wacc']:.0%}.",
+    )
+    d3.metric(
+        "TIR (IRR)",
+        f"{dcf['irr']:.1%}" if dcf["irr"] and dcf["irr"] > 0 else "< 0%",
+        help="Tasa interna de retorno. Si TIR > WACC el proyecto crea valor.",
+    )
+    d4.metric(
+        "Payback (recuperación)",
+        f"Año {dcf['payback']}" if dcf["payback"] is not None else f"> {dcf['n']} años",
+        help="Año en que el flujo de caja acumulado cruza cero y el proyecto empieza a ganar.",
+    )
+
+    fig_dcf = _chart_flujo_caja(dcf, str(row_sel.get("municipio", "")), ppa_slider)
+    st.plotly_chart(fig_dcf, use_container_width=True)
+
+    if dcf["payback"] is not None:
+        años_rentables = dcf["n"] - dcf["payback"]
+        ganancia_post = sum(dcf["flujos"][dcf["payback"]:]) / 1e6
+        st.success(
+            f"✅ Con PPA = **{ppa_slider} COP/kWh**, este municipio recupera la inversión en el **año {dcf['payback']}** "
+            f"y tiene **{años_rentables} años de ganancia pura** (sin pagar CAPEX). "
+            f"Ganancia total post-payback: **{ganancia_post:,.0f} M COP/ha**."
+        )
+    else:
+        ppa_minimo = None
+        for p in range(ppa_slider, 400, 5):
+            d_test = _calcular_dcf(row_sel, ppa=float(p))
+            if d_test["payback"] is not None:
+                ppa_minimo = p
+                break
+        if ppa_minimo:
+            st.warning(
+                f"⚠️ Con PPA = **{ppa_slider} COP/kWh** la inversión no se recupera en {dcf['n']} años. "
+                f"Se necesita un PPA de al menos **{ppa_minimo} COP/kWh** para que este municipio sea rentable."
+            )
+        else:
+            st.error(f"❌ Con los costos actuales este municipio no recupera la inversión en {dcf['n']} años para ningún PPA razonable.")
 
     st.divider()
 
