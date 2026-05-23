@@ -1974,33 +1974,39 @@ def _chart_rent_top10(top10: pd.DataFrame):
         f"#{i+1} {row['municipio']} ({row['departamento']})"
         for i, (_, row) in enumerate(top10.iterrows())
     ]
-    colors = [
-        _RENT_CLASS_COLORS.get(str(row.get("clasificacion_rentabilidad_ajustada", "sin_datos")), "#6B7280")
-        for _, row in top10.iterrows()
-    ]
-    scores = top10["score_rentabilidad_ajustada"].fillna(0).values.astype(float)
+    scores   = top10["score_rentabilidad_ajustada"].fillna(0).values.astype(float)
     margenes = top10["margen_estimado_cop_ha_year"].fillna(0).values.astype(float)
+
+    # Verde = margen positivo (gana dinero), Rojo = margen negativo (pierde dinero)
+    colors = ["#16A34A" if m > 0 else "#DC2626" for m in margenes]
+
+    etiquetas_barra = [
+        f"{'✅' if m > 0 else '❌'} {s:.3f}"
+        for s, m in zip(scores, margenes)
+    ]
 
     fig.add_trace(go.Bar(
         x=scores,
         y=y_labels,
         orientation="h",
         marker_color=colors,
-        text=[f"{s:.3f}" for s in scores],
+        text=etiquetas_barra,
         textposition="inside",
         insidetextanchor="middle",
         textfont=dict(color="white", size=13, family="Arial Black"),
         hovertemplate=[
             f"<b>{y_labels[i]}</b><br>"
-            f"Score rentabilidad: {scores[i]:.4f}<br>"
-            f"Margen estimado: {margenes[i]:,.0f} COP/ha/año<extra></extra>"
+            f"Score ranking: {scores[i]:.4f}<br>"
+            f"Margen REAL: {margenes[i]:,.0f} COP/ha/año<br>"
+            f"{'✅ Margen POSITIVO — proyecto rentable' if margenes[i]>0 else '❌ Margen NEGATIVO — costos superan ingresos'}"
+            f"<extra></extra>"
             for i in range(len(y_labels))
         ],
     ))
     fig.update_layout(
         title=dict(
-            text="Top 10 municipios — Score de rentabilidad ajustada",
-            font=dict(size=16, color="#111827", family="Arial"),
+            text="Top 10 municipios — Ranking de rentabilidad  (✅ verde = margen positivo · ❌ rojo = margen negativo)",
+            font=dict(size=15, color="#111827", family="Arial"),
             x=0.5,
         ),
         xaxis=dict(
@@ -2163,45 +2169,64 @@ def _chart_viab_vs_rent(df_r: pd.DataFrame) -> object:
 def render_rentabilidad_tab(df_r: pd.DataFrame) -> None:
     import plotly.graph_objects as go
 
-    st.subheader("Municipios mas rentables para una granja solar")
-    st.caption(
-        "Score de rentabilidad estimada por hectarea. Combina margen neto (70%) y relacion "
-        "beneficio/costo (30%), ajustado por la restriccion territorial (R_i). "
-        "**No es un VPN/TIR bancable** — es un ranking relativo basado en supuestos uniformes."
+    st.subheader("Ranking de municipios — rentabilidad estimada por hectarea")
+
+    n_positivos = (df_r["margen_estimado_cop_ha_year"] > 0).sum()
+    n_total     = len(df_r)
+
+    # Advertencia prominente sobre la naturaleza del score
+    st.error(
+        f"⚠️ **Importante — como leer este ranking:** "
+        f"El score (0–1) es un **ranking relativo**, NO un indicador de si el proyecto gana dinero. "
+        f"Con el PPA actual de 160 COP/kWh, solo **{n_positivos} de {n_total} municipios** "
+        f"tienen margen positivo real. Los demas estan rankeados por cual **pierde menos**, "
+        f"no porque sean rentables. "
+        f"**✅ Verde = margen positivo (gana dinero) · ❌ Rojo = margen negativo (pierde dinero)**. "
+        f"Usa el slider de PPA mas abajo para ver como mejora la situacion con precios reales de mercado."
     )
 
     # ── Metricas resumen ──────────────────────────────────────────────────────
-    top1 = df_r.iloc[0]
+    top1        = df_r.iloc[0]
     med_margen  = df_r["margen_estimado_cop_ha_year"].median()
-    n_positivos = (df_r["margen_estimado_cop_ha_year"] > 0).sum()
-    n_muy_alta  = (df_r["clasificacion_rentabilidad_ajustada"] == "muy_alta").sum()
+    top1_margen = float(top1["margen_estimado_cop_ha_year"])
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric(
-        "Municipio mas rentable",
+        "Mejor posicionado en el ranking",
         top1["municipio"],
-        f"Score {float(top1['score_rentabilidad_ajustada']):.3f}",
+        f"{'✅ Margen positivo' if top1_margen > 0 else '❌ Aun con margen negativo'}",
+        delta_color="normal" if top1_margen > 0 else "inverse",
     )
     c2.metric(
-        "Margen mediano estimado",
-        f"{med_margen:,.0f} COP/ha/año",
-        help="Mediana del margen neto estimado por hectarea al año entre todos los municipios.",
+        "Municipios con margen POSITIVO",
+        f"{n_positivos}",
+        f"de {n_total} totales ({n_positivos/n_total*100:.1f}%)",
+        delta_color="normal" if n_positivos > 0 else "off",
+        help="Solo estos municipios realmente ganan dinero con PPA=160 COP/kWh.",
     )
     c3.metric(
-        "Municipios con margen positivo",
-        f"{n_positivos:,}",
-        f"de {len(df_r):,} totales",
+        "Margen mediano nacional",
+        f"{med_margen/1e6:.1f} M COP/ha/año",
+        delta="negativo — PPA insuficiente" if med_margen < 0 else "positivo",
+        delta_color="inverse" if med_margen < 0 else "normal",
+        help="La mitad de municipios pierde mas de este monto por hectarea al año con PPA=160.",
     )
     c4.metric(
-        "Clasificacion muy_alta",
-        f"{n_muy_alta:,} municipios",
-        help="Municipios en el percentil 90+ de score de rentabilidad ajustada.",
+        "Mejor margen real",
+        f"{float(top1_margen)/1e6:.2f} M COP/ha/año",
+        help=f"Municipio: {top1['municipio']}. Es el unico con margen claramente positivo.",
     )
 
     st.divider()
 
     # ── Top 10 ranking ────────────────────────────────────────────────────────
-    st.markdown("### Top 10 — ranking de rentabilidad")
+    st.markdown("### Top 10 — ranking de posicionamiento relativo")
+    st.caption(
+        "🟢 **Verde** = margen positivo (el proyecto gana dinero con PPA=160 COP/kWh).  "
+        "🔴 **Rojo** = margen negativo (los costos superan los ingresos — el proyecto necesita "
+        "un PPA mas alto para ser viable). El score es util para **comparar** municipios entre si, "
+        "no para afirmar que todos son rentables."
+    )
     top10 = df_r.head(10).reset_index(drop=True)
     fig_top = _chart_rent_top10(top10)
     st.plotly_chart(fig_top, use_container_width=True)
@@ -2230,6 +2255,14 @@ def render_rentabilidad_tab(df_r: pd.DataFrame) -> None:
         top10[available_cols]
         .rename(columns=rename_map)
         .round(4)
+    )
+    # Columna explícita de rentabilidad real
+    tabla_top10.insert(
+        2,
+        "¿Rentable?",
+        top10["margen_estimado_cop_ha_year"]
+        .fillna(0)
+        .apply(lambda m: "✅ Sí" if m > 0 else "❌ No"),
     )
     st.dataframe(tabla_top10, use_container_width=True, hide_index=True)
 
