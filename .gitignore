@@ -5,6 +5,7 @@ env/
 .env
 .env.*
 !.env.mysql.example
+.streamlit/secrets.toml
 
 # Python
 __pycache__/
