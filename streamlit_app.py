@@ -2402,6 +2402,362 @@ def render_rentabilidad_tab(df_r: pd.DataFrame) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Pestaña glosario
+# ---------------------------------------------------------------------------
+
+_GLOSARIO: dict[str, list[tuple[str, str, str]]] = {
+    "Financiero y economico": [
+        ("PPA",
+         "Power Purchase Agreement — Contrato de compra de energia",
+         "Acuerdo entre el generador solar y un comprador (empresa, distribuidor o bolsa) que fija el "
+         "precio al que se vende cada kilovatio-hora durante toda la vida del proyecto. Es el supuesto "
+         "mas critico del modelo: si el PPA sube de 160 a 200 COP/kWh, el payback mejora de ~11 a ~9 años. "
+         "En Colombia los PPAs bilaterales solares 2024 rondan 180–260 COP/kWh."),
+        ("CAPEX",
+         "Capital Expenditure — Inversion de capital inicial",
+         "Gasto que se hace UNA SOLA VEZ al comienzo del proyecto para adquirir los activos fisicos: "
+         "paneles fotovoltaicos, inversores, estructura de soporte, obra civil, transformadores e "
+         "instalacion electrica. En este modelo se estima en ~749 M COP/ha (~USD 187,000/ha) basado "
+         "en precios NREL 2024. Es el costo dominante: representa el 80–85% del costo anualizado."),
+        ("OPEX",
+         "Operational Expenditure — Costos operativos anuales",
+         "Gastos recurrentes para mantener la planta funcionando: limpieza de paneles, mantenimiento "
+         "preventivo y correctivo, seguros, gestion de activos, arrendamiento del terreno y personal de "
+         "seguridad. Se estima como 1.8% del CAPEX por año, que es el estandar IRENA/NREL para "
+         "proyectos utility-scale en Latinoamerica."),
+        ("WACC",
+         "Weighted Average Cost of Capital — Costo promedio ponderado del capital",
+         "Tasa minima de retorno que exigen los inversionistas del proyecto, ponderando deuda y equity. "
+         "Se usa para descontar los flujos futuros al presente (VPN) y como umbral de comparacion con "
+         "la TIR. En este modelo se asume 8%, que es conservador para un proyecto solar en Colombia "
+         "con riesgo moderado. Un WACC menor (ej. 6% con deuda subsidiada) mejora significativamente "
+         "el VPN."),
+        ("CRF",
+         "Capital Recovery Factor — Factor de recuperacion de capital",
+         "Formula financiera que convierte un costo unico (CAPEX) en una cuota anual equivalente, "
+         "considerando el costo del capital: CRF = WACC / (1 - (1+WACC)^-n). Con WACC=8% y n=25 "
+         "años, CRF = 0.0937, lo que significa que cada año se paga el 9.37% del CAPEX original. "
+         "El modelo levelizado usa CRF para comparar proyectos con distintas vidas utiles en un "
+         "solo numero anual."),
+        ("VPN / NPV",
+         "Valor Presente Neto / Net Present Value",
+         "Suma de todos los flujos de caja futuros del proyecto traidos al valor de hoy, descontados "
+         "al WACC. VPN > 0 significa que el proyecto genera mas valor que lo que cuesta el capital. "
+         "VPN = -Inversion + Σ(Flujo_t / (1+WACC)^t). Es la metrica principal para decidir si "
+         "un proyecto se hace o no."),
+        ("TIR / IRR",
+         "Tasa Interna de Retorno / Internal Rate of Return",
+         "Tasa de descuento que hace que el VPN sea exactamente cero. Si TIR > WACC, el proyecto "
+         "rinde mas que lo que cuesta el capital y conviene realizarlo. Si TIR < WACC, el proyecto "
+         "destruye valor. Para un proyecto solar tipico en Colombia con PPA de 200 COP/kWh, "
+         "la TIR suele estar entre 8% y 15% dependiendo del recurso solar y los costos locales."),
+        ("Payback",
+         "Periodo de recuperacion de la inversion",
+         "Numero de años necesarios para que los flujos de caja acumulados igualen la inversion "
+         "inicial. Ejemplo: si invierto 749 M COP/ha y gano 80 M COP/ha/año (sin CAPEX), el "
+         "payback es ~9-11 años. Los años POSTERIORES al payback son ganancia pura. En el modelo "
+         "de flujo real (equity, sin deuda) el payback tipico en Colombia es 7-13 años segun "
+         "la radiacion solar y el PPA."),
+        ("TRM",
+         "Tasa Representativa del Mercado — Tasa de cambio COP/USD",
+         "Precio oficial del dolar en pesos colombianos. Los paneles solares y gran parte del "
+         "equipamiento se importa y se cotiza en USD, por lo que una devaluacion del peso "
+         "encarece directamente el CAPEX. El modelo usa TRM = 4,000 COP/USD (2024). "
+         "Con TRM = 4,500, el CAPEX sube ~12.5%."),
+        ("Margen neto",
+         "Diferencia entre ingresos totales y costos totales por hectarea y año",
+         "En el modelo levelizado: Margen = Ingreso_energia - (CAPEX_anualizado + OPEX + "
+         "Interconexion + Agua + Agro + Riesgo). Un margen negativo NO significa que el proyecto "
+         "pierda dinero durante toda su vida: significa que el modelo levelizado reparte el CAPEX "
+         "uniformemente y el ingreso a 160 COP/kWh no cubre esa cuota. El analisis DCF real "
+         "muestra la perspectiva correcta."),
+        ("Relacion B/C",
+         "Relacion Beneficio / Costo",
+         "Cociente entre el ingreso total y el costo total: B/C = Ingreso / Costo_total. "
+         "B/C > 1 = el proyecto genera mas de lo que cuesta (rentable). "
+         "B/C = 1.013 para Los Santos significa que por cada peso invertido se reciben 1.013 pesos. "
+         "Es un complemento al margen que permite comparar proyectos de distinto tamaño."),
+        ("Flujo de caja (DCF)",
+         "Descounted Cash Flow — Flujo de caja descontado",
+         "Metodo que calcula el valor de un proyecto modelando los cobros y pagos reales año a año "
+         "y traiendolos al presente con una tasa de descuento (WACC). A diferencia del modelo "
+         "levelizado (CRF), el DCF muestra exactamente en que año el acumulado cruza cero "
+         "(payback) y cual es el retorno real del proyecto."),
+    ],
+    "Tecnico solar y energia": [
+        ("PVOUT",
+         "Photovoltaic Output — Rendimiento fotovoltaico especifico",
+         "Energia electrica real producida por cada kilovatio pico instalado en un dia promedio, "
+         "expresada en kWh/kWp/dia. Ya descuenta perdidas por temperatura, angulo solar, suciedad "
+         "e ineficiencia del inversor. Es el dato que usan los bancos para calcular la generacion "
+         "de un proyecto. Fuente: Solargis (modelo satelital de alta resolucion). En Colombia varia "
+         "de ~3.0 kWh/kWp/dia (Pacifico) a ~5.8 kWh/kWp/dia (La Guajira)."),
+        ("kWp",
+         "Kilovatio pico — Capacidad nominal de un panel solar",
+         "Potencia electrica que genera un panel en condiciones estandar de laboratorio (1000 W/m², "
+         "25°C, espectro AM1.5). Un panel de 600 Wp genera 600 W en esas condiciones ideales. "
+         "En campo real genera menos por temperatura, nubosidad y angulo. "
+         "La capacidad instalada de una planta utility-scale se mide en MWp (megavatios pico)."),
+        ("kWh / MWh",
+         "Kilovatio-hora / Megavatio-hora — Unidad de energia",
+         "Medida de energia (no de potencia). 1 kWh = energia consumida por un aparato de 1 kW "
+         "durante 1 hora. 1 MWh = 1,000 kWh. La generacion anual de una planta se expresa en MWh/año "
+         "o GWh/año. El ingreso se calcula: Ingreso = MWh_generados × PPA (COP/kWh)."),
+        ("kWh/m²/dia",
+         "Irradiacion solar global horizontal diaria",
+         "Energia solar total que llega a un metro cuadrado de superficie horizontal en un dia "
+         "promedio. Es la 'materia prima' del proyecto. Mayor irradiacion = mas generacion. "
+         "Fuente: NASA Power (promedio multianual 2001-2022). No confundir con PVOUT: la "
+         "irradiacion es el recurso bruto, el PVOUT es lo que realmente produce el panel."),
+        ("kWh/kWp/dia",
+         "Rendimiento especifico diario del sistema fotovoltaico",
+         "Ver PVOUT. Relacion entre la energia producida y la capacidad instalada. Permite "
+         "comparar la productividad de ubicaciones con distintos tamaños de planta."),
+        ("MVA",
+         "Megavoltamperio — Capacidad de transformacion electrica",
+         "Unidad de potencia aparente de una subestacion electrica. Indica cuanta energia puede "
+         "transformar y evacuar la subestacion. Una subestacion rural tiene 10-40 MVA; una "
+         "troncal puede superar 900 MVA. Si la subestacion mas cercana esta saturada "
+         "(poca MVA disponible), el proyecto necesita costosas ampliaciones aunque este cerca."),
+        ("Degradacion de paneles",
+         "Perdida anual de eficiencia de los modulos fotovoltaicos",
+         "Los paneles de silicio cristalino pierden aproximadamente 0.5% de su capacidad cada año "
+         "por degradacion de los materiales (LID, PID, decoloracion del encapsulante). En el "
+         "modelo DCF se aplica: Generacion_t = Generacion_año1 × (1 - 0.005)^t. Al año 25 "
+         "el panel produce ~88% de su capacidad original. Los fabricantes garantizan minimo "
+         "80% al año 25."),
+        ("Nivel de tension",
+         "Clasificacion de la subestacion electrica por voltaje de operacion",
+         "El SIN (Sistema Interconectado Nacional) de Colombia clasifica la infraestructura "
+         "electrica en 5 niveles: Nivel 1 (<1 kV, distribucion baja tension), Nivel 2 (1-30 kV), "
+         "Nivel 3 (30-115 kV), Nivel 4 (115-220 kV), Nivel 5 (>220 kV, transmision nacional). "
+         "Un proyecto solar utility-scale necesita conectarse a Nivel 4 o 5 para evacuar "
+         "grandes volumenes de energia."),
+        ("Agrivoltaico",
+         "Sistema que combina produccion solar y agropecuaria en la misma tierra",
+         "Modelo de uso dual del suelo donde los paneles solares se instalan a mayor altura "
+         "y espaciado para permitir que el ganado paste o los cultivos crezcan debajo. "
+         "La sombra parcial (40-60%) de los paneles reduce el estres hidrico del pasto y "
+         "aumenta la carga animal posible (hasta 2 UGG/ha vs 1.5 UGG/ha tradicional). "
+         "Concepto clave del proyecto ITM."),
+        ("UGG / UGG/ha",
+         "Unidad Gran Ganado — Unidad Gran Ganado por hectarea",
+         "Unidad estandar para medir la carga ganadera. 1 UGG = 1 bovino adulto de 450 kg. "
+         "Permite comparar distintas especies y categorias: 1 vaca = 1 UGG, 1 ternero = 0.5 UGG, "
+         "1 caballo = 1.25 UGG. La carga optima para pastoreo tropical en Colombia es "
+         "1.0-1.5 UGG/ha en sistema tradicional y hasta 2.0 UGG/ha en sistema agrivoltaico "
+         "gracias a la sombra de los paneles."),
+    ],
+    "Scores y modelo matematico": [
+        ("Score (0-1)",
+         "Puntuacion normalizada que representa que tan favorable es una variable",
+         "Numero entre 0 y 1 donde 0 = la peor condicion del pais y 1 = la mejor. "
+         "Se obtiene normalizando los datos reales con la formula Min-Max: "
+         "Score = (valor - minimo) / (maximo - minimo). Permite comparar variables con "
+         "unidades distintas (km, COP, kWh, %) en una escala comun."),
+        ("Min-Max normalizacion",
+         "Tecnica de escalado de datos al rango [0, 1]",
+         "Transforma cualquier variable numerica dividiendo por el rango del pais: "
+         "Si la distancia a subestacion varia de 0 a 700 km, un municipio a 35 km tiene "
+         "score = (700-35)/(700-0) = 0.95 (muy bueno). Si higher_is_better=False se invierte "
+         "la formula. Limitacion: el score de un municipio cambia si entran nuevos municipios "
+         "que cambian el minimo o maximo nacional."),
+        ("v_i_multidimensional",
+         "Score de viabilidad multidimensional municipal (variable principal del modelo)",
+         "Puntuacion final de viabilidad solar de cada municipio, entre 0 y 1. Se calcula como: "
+         "v_i = R_i × Σ(score_dim × peso_dim) / Σ(pesos_disponibles). Donde R_i es la "
+         "restriccion territorial (0 = excluido, 1 = viable). Las 5 dimensiones son Fisico "
+         "(30%), Electrico (25%), Economico (20%), Agropecuario (15%) y Riesgo (10%)."),
+        ("R_i (restriccion territorial)",
+         "Factor binario o continuo que excluye municipios con restricciones criticas",
+         "Multiplicador que va de 0 a 1. R_i = 0 excluye totalmente el municipio del ranking. "
+         "Se calcula como el producto de: pendiente viable (IGAC), distancia < 50km a subestacion, "
+         "fraccion no protegida RUNAP, no ser zona urbana segun POT y no tener restriccion "
+         "territorial POT. Si cualquiera de estos es 0, R_i = 0 y v_i = 0."),
+        ("score_rentabilidad_ajustada",
+         "Score de rentabilidad corregido por la restriccion territorial",
+         "score_rentabilidad × R_i_preliminar. Si un municipio tiene buena rentabilidad "
+         "economica pero esta excluido territorialmente (R_i=0), su score ajustado es 0. "
+         "Esto evita que municipios en areas protegidas o de alta pendiente aparezcan "
+         "como rentables cuando fisicamente no son construibles."),
+        ("clasificacion_multidim",
+         "Categoria cualitativa del score multidimensional por percentiles",
+         "Clasifica los municipios en: muy_alta (percentil >90%), alta (75-90%), "
+         "media (50-75%), baja (<50%), excluida (R_i=0) y sin_datos. "
+         "Los percentiles se calculan solo sobre municipios con score > 0, por lo que "
+         "los excluidos no distorsionan la distribucion."),
+    ],
+    "Entidades y fuentes de datos": [
+        ("NASA Power",
+         "Prediction Of Worldwide Energy Resources — Base de datos climatica satelital de la NASA",
+         "Serie climatica multianual (2001-2022) derivada de modelos atmosfericos y observaciones "
+         "satelitales. Proporciona temperatura, viento, precipitacion e irradiacion solar para "
+         "cualquier punto del planeta en cuadricula de ~50 km. Es gratuita y de acceso abierto. "
+         "Limitacion: resolucion espacial gruesa; no captura variaciones locales de topografia."),
+        ("Solargis / PVOUT",
+         "Empresa eslovaca de analisis de recursos solares — dato de rendimiento fotovoltaico",
+         "Proveedor comercial de datos solares de alta resolucion (~1 km) basado en imagenes "
+         "satelitales. Su producto PVOUT (Photovoltaic Output) es el dato de referencia que usan "
+         "bancos e inversionistas para financiar proyectos solares. Este proyecto usa el mapa "
+         "PVOUT de Colombia descargado de la plataforma global de Solargis/World Bank."),
+        ("UPME",
+         "Unidad de Planeacion Minero Energetica — Colombia",
+         "Entidad del Ministerio de Minas y Energia que planifica el sistema energetico nacional. "
+         "Publica el mapa oficial de subestaciones del SIN (Sistema Interconectado Nacional) "
+         "con ubicacion, nivel de tension y capacidad en MVA. Es la fuente de la dimension "
+         "Electrico del modelo."),
+        ("IGAC",
+         "Instituto Geografico Agustin Codazzi — Colombia",
+         "Entidad oficial colombiana de cartografia y catastro. Produce los mapas de pendientes "
+         "del terreno (clasificacion en 5 rangos desde plano hasta muy escarpado) y los datos "
+         "prediales del pais. En este modelo se usa la clase de pendiente para calcular "
+         "score_pendiente: terrenos planos y ligeramente ondulados son viables, "
+         "muy escarpados son excluidos."),
+        ("RUNAP",
+         "Registro Unico Nacional de Areas Protegidas — Colombia",
+         "Base de datos oficial de Parques Nacionales Naturales de Colombia con todos los "
+         "poligonos de areas bajo algun regimen de proteccion ambiental: parques nacionales, "
+         "reservas forestales, sitios Ramsar, distritos de manejo integrado, etc. "
+         "En area RUNAP NO se puede instalar infraestructura solar. El modelo calcula "
+         "que porcentaje del municipio esta protegido y lo usa como restriccion."),
+        ("POT",
+         "Plan de Ordenamiento Territorial — Instrumento de planificacion municipal",
+         "Documento legal que cada municipio colombiano elabora para definir el uso del "
+         "suelo: zonas urbanas, rurales, de expansion, de proteccion, industriales, etc. "
+         "Si el punto de muestreo cae en zona urbana o en uso restringido segun el POT, "
+         "R_i = 0. Limitacion del modelo: muchos municipios no tienen digitalizados sus POT "
+         "o las capas no estan disponibles en formatos compatibles."),
+        ("UPRA",
+         "Unidad de Planificacion Rural Agropecuaria — Colombia",
+         "Entidad del Ministerio de Agricultura que produce informacion sobre uso y aptitud "
+         "del suelo rural, precios de tierras agropecuarias y conflictos de uso. "
+         "En este modelo se usa para: precio de la tierra (dimension Economico), "
+         "carga bovina por municipio (dimension Agropecuario) y conflicto de uso del suelo "
+         "(sobreutilizacion indica mayor oportunidad agrivoltaica)."),
+        ("SUI",
+         "Sistema Unico de Informacion de Servicios Publicos — Colombia",
+         "Base de datos de la Superintendencia de Servicios Publicos Domiciliarios con "
+         "tarifas y coberturas de acueducto, alcantarillado y aseo por municipio. "
+         "En este modelo se usa la tarifa de acueducto (COP/m³) para estimar el costo "
+         "de agua para limpieza de paneles."),
+        ("INVIAS",
+         "Instituto Nacional de Vias — Colombia",
+         "Entidad que administra la red vial nacional (primaria y secundaria). "
+         "Proporciona la ubicacion de las carreteras primarias del pais. "
+         "En este modelo se calcula la distancia de cada municipio a la via primaria "
+         "mas cercana como proxy del costo de logistica y transporte de equipos."),
+        ("IDEAM",
+         "Instituto de Hidrologia, Meteorologia y Estudios Ambientales — Colombia",
+         "Entidad oficial de climatologia e hidrologia. Produce registros historicos de "
+         "estaciones meteorologicas (temperatura, precipitacion, viento) distribuidas en "
+         "el territorio nacional. En este modelo se usa como fuente climatica complementaria "
+         "a NASA Power cuando hay estaciones cercanas (mayor precision local)."),
+        ("ERA5 / Copernicus",
+         "Reanalis climatico global del Centro Europeo de Prevision Meteorologica",
+         "Base de datos climatica de alta resolucion (~30 km) producida por el ECMWF "
+         "(Centro Europeo de Prevision Meteorologica a Plazo Medio) a traves del "
+         "programa Copernicus de la Union Europea. Cubre 1940-presente con datos horarios "
+         "de temperatura, viento, precipitacion y cobertura de nubes. En este modelo "
+         "se prefiere ERA5 sobre NASA Power por su mayor resolucion espacial."),
+        ("DNP / IMRC",
+         "Departamento Nacional de Planeacion — Indice Municipal de Riesgo de Desastres",
+         "El DNP es la entidad de planeacion economica de Colombia. El IMRC es su indice "
+         "compuesto de riesgo municipal que combina amenaza + exposicion + vulnerabilidad "
+         "para inundaciones, deslizamientos y sequias. En este modelo se usa para la "
+         "dimension Riesgo. Limitacion: los datos IMRC no estaban disponibles en el "
+         "pipeline y el score_riesgo se calculo solo con viento (baja discriminacion)."),
+        ("EVA-ICA",
+         "Evaluacion Agropecuaria Municipal — Instituto Colombiano Agropecuario",
+         "Encuesta anual del ICA y el Ministerio de Agricultura que recopila inventarios "
+         "ganaderos, areas cultivadas y produccion agricola por municipio. "
+         "En este modelo se usa el inventario bovino para calcular la carga ganadera "
+         "(UGG/ha) como proxy de la oportunidad agrivoltaica."),
+    ],
+    "Unidades de medida": [
+        ("COP",
+         "Peso colombiano — moneda local",
+         "Moneda oficial de Colombia. Todos los costos e ingresos del modelo se expresan "
+         "en COP para facilitar la comparacion con datos locales. 1 USD = ~4,000 COP (2024). "
+         "M COP = millones de pesos colombianos."),
+        ("USD",
+         "Dolar estadounidense — moneda de referencia internacional",
+         "Los costos de paneles, inversores y equipos de importacion se cotizan en dolares. "
+         "El modelo convierte a COP usando la TRM."),
+        ("ha (hectarea)",
+         "Unidad de superficie agricola = 10,000 m² = 0.01 km²",
+         "Unidad estandar para medir terrenos agropecuarios y proyectos solares. "
+         "1 hectarea = 100m × 100m. Una planta solar utility-scale tipica ocupa "
+         "50-500 ha. El modelo calcula costos e ingresos por hectarea para poder "
+         "comparar municipios de distintos tamaños."),
+        ("MW / MWp",
+         "Megavatio / Megavatio pico — potencia electrica",
+         "1 MW = 1,000 kW = 1,000,000 W. Es la unidad de potencia (capacidad instalada) "
+         "de una planta electrica. MWp es la capacidad pico de paneles solares. "
+         "Una planta de 100 MWp genera aproximadamente 150,000-200,000 MWh al año "
+         "segun el recurso solar."),
+        ("MWh / GWh",
+         "Megavatio-hora / Gigavatio-hora — energia generada",
+         "1 MWh = 1,000 kWh. 1 GWh = 1,000 MWh. Es la unidad de energia (no de potencia). "
+         "Una planta de 100 MWp en Colombia genera ~170,000 MWh/año (~170 GWh/año). "
+         "El ingreso se calcula multiplicando los MWh por el PPA en COP/kWh."),
+        ("km / km²",
+         "Kilometro / Kilometro cuadrado — distancia y superficie",
+         "km: unidad de distancia usada para distancia a subestacion y a vias. "
+         "km²: unidad de superficie del municipio (1 km² = 100 ha). "
+         "El area municipal en Colombia varia de <10 km² (municipios urbanos densos) "
+         "a >10,000 km² (municipios amazónicos)."),
+        ("COP/kWh",
+         "Pesos colombianos por kilovatio-hora — precio de la energia",
+         "Unidad del PPA: cuanto paga el comprador por cada unidad de energia producida. "
+         "160 COP/kWh = 0.04 USD/kWh (muy bajo). 200 COP/kWh = 0.05 USD/kWh (mercado). "
+         "250 COP/kWh = 0.0625 USD/kWh (optimo para proyectos con CAPEX alto)."),
+        ("COP/ha/año",
+         "Pesos colombianos por hectarea por año — metrica de rentabilidad",
+         "Unidad principal del modelo de rentabilidad. Permite comparar municipios de "
+         "distintos tamaños en una base comun: cuanto ingresa y cuanto cuesta operar "
+         "cada hectarea de granja solar en un año. El ingreso tipico es ~80-90 M COP/ha/año "
+         "y el OPEX es ~13-15 M COP/ha/año."),
+    ],
+}
+
+
+def render_glosario_tab() -> None:
+    st.subheader("Glosario — terminos, siglas y abreviaturas del modelo")
+    st.caption(
+        "Referencia completa de todos los conceptos usados en el dashboard. "
+        "Haz clic en cada categoria para expandirla."
+    )
+
+    for categoria, terminos in _GLOSARIO.items():
+        icono = {
+            "Financiero y economico":       "💵",
+            "Tecnico solar y energia":      "⚡",
+            "Scores y modelo matematico":   "📐",
+            "Entidades y fuentes de datos": "🏛️",
+            "Unidades de medida":           "📏",
+        }.get(categoria, "📖")
+
+        with st.expander(f"{icono} {categoria}  —  {len(terminos)} terminos", expanded=False):
+            for sigla, nombre, descripcion in terminos:
+                st.markdown(
+                    f"<div style='border-left: 4px solid #2563EB; padding: 10px 16px; "
+                    f"margin-bottom: 12px; background:#1e293b; border-radius: 0 6px 6px 0;'>"
+                    f"<span style='font-size:1.05em; font-weight:700; color:#60A5FA;'>{sigla}</span>"
+                    f"<span style='color:#94A3B8; font-size:0.9em;'> — {nombre}</span><br>"
+                    f"<span style='color:#E2E8F0; font-size:0.92em; line-height:1.6;'>{descripcion}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+    st.divider()
+    st.markdown(
+        "**Fuentes principales:** NASA Power · Solargis · IGAC · UPME · RUNAP · UPRA · "
+        "SUI · INVIAS · IDEAM · ERA5/Copernicus · DNP · EVA-ICA  \n"
+        "**Modelo desarrollado por:** Jhon T — ITM, Introduccion a la Inteligencia Artificial"
+    )
+
+
+# ---------------------------------------------------------------------------
 # App principal
 # ---------------------------------------------------------------------------
 def main() -> None:
@@ -2441,12 +2797,13 @@ def main() -> None:
 
     df_rent = load_rentabilidad()
 
-    tab_ranking, tab_raw, tab_agro, tab_fin, tab_rent = st.tabs([
+    tab_ranking, tab_raw, tab_agro, tab_fin, tab_rent, tab_glosario = st.tabs([
         "Ranking",
         "Variables crudas por dimension",
         "Beneficio Agrivoltaico",
         "Viabilidad Financiera",
         "💰 Rentabilidad",
+        "📖 Glosario",
     ])
 
     with tab_raw:
@@ -2469,6 +2826,9 @@ def main() -> None:
                 "No se encontro el archivo de rentabilidad. "
                 "Ejecuta primero: `python -m src.scoring.rentabilidad_municipal`"
             )
+
+    with tab_glosario:
+        render_glosario_tab()
 
     st.caption(
         "Datos: NASA Power · IGAC · UPME · RUNAP · UPRA · EVA-ICA · IMRC DNP · SUI · INVIAS. "
