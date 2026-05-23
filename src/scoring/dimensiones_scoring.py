@@ -63,31 +63,22 @@ def _minmax(series: pd.Series, higher_is_better: bool = True) -> pd.Series:
 
 
 def _weighted_dim(terms: list[tuple[pd.Series, float]]) -> pd.Series:
-    """Combina terminos con redistribucion de pesos si hay nulos."""
+    """Combina terminos redistribuyendo pesos por fila si hay nulos."""
     index = terms[0][0].index
-    result = pd.Series(0.0, index=index, dtype="float64")
-    total_weight = 0.0
-    for series, weight in terms:
-        values = pd.to_numeric(series, errors="coerce")
-        has_value = values.notna()
-        result = result.where(~has_value, result + values.fillna(0.0) * weight)
-        total_weight_vec = pd.Series(0.0, index=index)
-        total_weight_vec[has_value] = weight
-        result_denom = total_weight_vec
-        if not hasattr(_weighted_dim, "_denoms"):
-            pass
-        total_weight += weight
-
     usable = [(s, w) for s, w in terms if pd.to_numeric(s, errors="coerce").notna().any()]
     if not usable:
         return pd.Series(pd.NA, index=index, dtype="Float64")
 
-    w_sum = sum(w for _, w in usable)
     result = pd.Series(0.0, index=index, dtype="float64")
+    denominator = pd.Series(0.0, index=index, dtype="float64")
     for series, weight in usable:
-        values = pd.to_numeric(series, errors="coerce").fillna(0.0)
-        result += values * (weight / w_sum)
-    return result.clip(0.0, 1.0)
+        values = pd.to_numeric(series, errors="coerce")
+        has_value = values.notna()
+        result += values.fillna(0.0) * weight
+        denominator += has_value.astype(float) * weight
+
+    scored = result / denominator.where(denominator > 0)
+    return scored.clip(0.0, 1.0).astype("Float64")
 
 
 def _first_available(df: pd.DataFrame, candidates: list[str]) -> pd.Series | None:
@@ -108,26 +99,26 @@ def _build_score_fisico(df: pd.DataFrame) -> pd.Series:
     if "score_pendiente" in df.columns:
         terms.append((pd.to_numeric(df["score_pendiente"], errors="coerce"), 0.25))
 
-    # Temperatura: prefiere NASA, luego IDEAM BART, luego ERA5
-    t2m_series = _first_available(df, ["t2m_media", "ideam_t_media_c", "era5_t2m_media_c"])
+    # Temperatura: prefiere ERA5 por resolucion espacial, luego IDEAM BART, luego NASA.
+    t2m_series = _first_available(df, ["era5_t2m_media_c", "ideam_t_media_c", "t2m_media"])
     if t2m_series is not None:
         t2m = pd.to_numeric(t2m_series, errors="coerce")
         terms.append((_minmax(t2m.clip(upper=40.0), higher_is_better=False), 0.15))
 
-    # Nubosidad: NASA o ERA5
-    cloud_series = _first_available(df, ["cloud_amt_media", "era5_cloud_cover_media"])
+    # Nubosidad: ERA5 si existe, luego NASA.
+    cloud_series = _first_available(df, ["era5_cloud_cover_media", "cloud_amt_media"])
     if cloud_series is not None:
         terms.append((_minmax(cloud_series, higher_is_better=False), 0.10))
 
-    # Viento: prefiere NASA, luego IDEAM BART, luego ERA5
-    ws_series = _first_available(df, ["ws10m_media", "ideam_viento_media_m_s", "era5_ws10m_media_m_s"])
+    # Viento: prefiere ERA5 por resolucion espacial, luego IDEAM BART, luego NASA.
+    ws_series = _first_available(df, ["era5_ws10m_media_m_s", "ideam_viento_media_m_s", "ws10m_media"])
     if ws_series is not None:
         ws = pd.to_numeric(ws_series, errors="coerce")
         terms.append((_minmax(ws.clip(0, 15), higher_is_better=False), 0.10))
 
-    # Precipitacion: prefiere NASA, luego IDEAM BART, luego ERA5
+    # Precipitacion: prefiere ERA5 por resolucion espacial, luego IDEAM BART, luego NASA.
     prec_series = _first_available(
-        df, ["prectotcorr_suma_mm_year", "ideam_prec_suma_mm_year", "era5_prec_suma_mm_year"]
+        df, ["era5_prec_suma_mm_year", "ideam_prec_suma_mm_year", "prectotcorr_suma_mm_year"]
     )
     if prec_series is not None:
         prec = pd.to_numeric(prec_series, errors="coerce")
@@ -189,8 +180,11 @@ def _build_score_economico(
         )
         terms.append((_minmax(merged["dist_via_primaria_km"], higher_is_better=False), 0.30))
 
-    if "prectotcorr_suma_mm_year" in df.columns:
-        prec = pd.to_numeric(df["prectotcorr_suma_mm_year"], errors="coerce")
+    prec_series = _first_available(
+        df, ["era5_prec_suma_mm_year", "ideam_prec_suma_mm_year", "prectotcorr_suma_mm_year"]
+    )
+    if prec_series is not None:
+        prec = pd.to_numeric(prec_series, errors="coerce")
         prec_clipped = prec.clip(300, 3000)
         prec_norm = _minmax(prec_clipped, higher_is_better=True)
         terms.append((prec_norm, 0.20))
@@ -294,7 +288,7 @@ def _build_score_riesgo(df: pd.DataFrame, ideam: pd.DataFrame | None) -> pd.Seri
         terms.append((_minmax(riesgo, higher_is_better=False), 0.25))
 
     prec_series = _first_available(
-        df, ["prectotcorr_suma_mm_year", "ideam_prec_suma_mm_year", "era5_prec_suma_mm_year"]
+        df, ["era5_prec_suma_mm_year", "ideam_prec_suma_mm_year", "prectotcorr_suma_mm_year"]
     )
     if prec_series is not None:
         prec = pd.to_numeric(prec_series, errors="coerce")

@@ -65,8 +65,11 @@ Uso
 from __future__ import annotations
 
 import argparse
+import calendar
 import os
+import zipfile
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -133,7 +136,7 @@ def _download_era5(raw_dir: Path, year: int, force: bool) -> Path:
     output_path = raw_dir / f"era5_land_colombia_{year}.nc"
     if output_path.exists() and not force:
         print(f"  ERA5 {year}: usando cache {output_path}")
-        return output_path
+        return _ensure_netcdf_from_download(output_path)
 
     api_key = _load_credentials()
     client = cdsapi.Client(
@@ -157,7 +160,26 @@ def _download_era5(raw_dir: Path, year: int, force: bool) -> Path:
         str(output_path),
     )
     print(f"  Descargado: {output_path}")
-    return output_path
+    return _ensure_netcdf_from_download(output_path)
+
+
+def _ensure_netcdf_from_download(path: Path) -> Path:
+    """CDS puede entregar un ZIP aunque el destino se llame .nc."""
+    if not zipfile.is_zipfile(path):
+        return path
+
+    extract_dir = path.with_suffix("")
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path) as zf:
+        nc_members = [m for m in zf.namelist() if m.lower().endswith((".nc", ".netcdf"))]
+        if not nc_members:
+            raise ValueError(f"El ZIP descargado no contiene NetCDF: {path}")
+        member = nc_members[0]
+        extracted = extract_dir / Path(member).name
+        if not extracted.exists() or extracted.stat().st_size == 0:
+            zf.extract(member, extract_dir)
+    print(f"  ERA5 ZIP extraido: {extracted}")
+    return extracted
 
 
 def _extract_municipal_values(nc_path: Path, municipalities_csv: Path) -> pd.DataFrame:
@@ -217,9 +239,16 @@ def _extract_municipal_values(nc_path: Path, municipalities_csv: Path) -> pd.Dat
                     point_data["t2m_max_c"] = float(np.nanmax(monthly_c))
 
                 elif short_var == "tp":
-                    prec_mm_day = monthly_values * SECONDS_PER_DAY * 1000
+                    # ERA5-Land monthly means stores total_precipitation in metres
+                    # of water equivalent as a monthly mean of daily totals.
+                    # Convert each monthly daily mean to mm/day, then annualize
+                    # with the number of days in each month.
+                    prec_mm_day = monthly_values * 1000
+                    days = _days_for_monthly_values(ds, len(prec_mm_day))
                     point_data["prec_media_mm_day"] = float(np.nanmean(prec_mm_day))
-                    point_data["prec_suma_mm_year"] = float(np.nansum(prec_mm_day) * 30.44)
+                    point_data["prec_suma_mm_year"] = (
+                        float(np.nansum(prec_mm_day * days)) if np.isfinite(prec_mm_day).any() else float("nan")
+                    )
 
                 elif short_var in ("u10", "v10"):
                     pass
@@ -246,6 +275,22 @@ def _extract_municipal_values(nc_path: Path, municipalities_csv: Path) -> pd.Dat
     return pd.DataFrame(rows)
 
 
+def _days_for_monthly_values(ds: Any, n_values: int) -> Any:
+    """Retorna dias por mes alineados al eje temporal mensual de ERA5."""
+    import numpy as np
+
+    time_coord = "valid_time" if "valid_time" in ds.coords else "time"
+    if time_coord not in ds.coords:
+        return np.full(n_values, 30.44)
+
+    values = ds[time_coord].values[:n_values]
+    days: list[int] = []
+    for value in values:
+        ts = pd.Timestamp(value)
+        days.append(calendar.monthrange(ts.year, ts.month)[1])
+    return np.asarray(days, dtype=float)
+
+
 def write_observations(path: Path, n: int, year: int) -> None:
     lines = [
         "Copernicus ERA5-Land - Variables climaticas municipales",
@@ -262,13 +307,13 @@ def write_observations(path: Path, n: int, year: int) -> None:
         "  t2m_media_c      : Temperatura media anual (°C, conversion desde Kelvin)",
         "  t2m_min_c        : Temperatura minima mensual media del anio",
         "  t2m_max_c        : Temperatura maxima mensual media del anio",
-        "  prec_media_mm_day: Precipitacion diaria media (mm, conversion desde m/s)",
+        "  prec_media_mm_day: Precipitacion diaria media (mm/dia)",
         "  prec_suma_mm_year: Precipitacion total anual estimada (mm)",
         "  ws10m_media_m_s  : Velocidad del viento a 10m (m/s, vector magnitude)",
         "  cloud_cover_media: Fraccion de cobertura nubosa media (0-1)",
         "",
         "Uso en scoring multidimensional:",
-        "  score_fisico: t2m, cloud_cover, ws10m, prec_suma como componentes",
+        "  score_fisico: t2m, ws10m, prec_suma como componentes",
         "  score_economico: prec_suma como proxy disponibilidad agua",
         "  score_riesgo: prec_suma > 3000 mm/year como proxy lluvias extremas",
         "",
@@ -278,7 +323,6 @@ def write_observations(path: Path, n: int, year: int) -> None:
         "  - ERA5 viento: magnitud del vector (sqrt(u^2 + v^2)).",
         "",
         "Credenciales requeridas en .env:",
-        "  CDS_UID=tu_uid",
         "  CDS_API_KEY=tu-api-key",
         "  Ver: https://cds.climate.copernicus.eu/profile",
     ]

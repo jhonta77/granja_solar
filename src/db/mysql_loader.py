@@ -732,6 +732,16 @@ def build_viabilidad_multidimensional() -> pd.DataFrame | None:
     return _filter_valid(df[available].copy())
 
 
+def build_rentabilidad_municipal() -> pd.DataFrame | None:
+    path = DATA_CLEAN_DIR / "rentabilidad_municipal" / "rentabilidad_municipal.csv"
+    if not path.exists():
+        return None
+    df = read_csv(path, string_columns=["codigo_dane"])
+    df["codigo_dane"] = ensure_string_code(df["codigo_dane"])
+    df = _filter_valid(df)
+    return df.drop_duplicates(subset=["codigo_dane"], keep="first").copy()
+
+
 def build_viabilidad_and_clusters() -> dict[str, pd.DataFrame]:
     viability_path = DATA_CLEAN_DIR / "viabilidad_municipal" / "viabilidad_municipal_preliminar.csv"
     cluster_dir = DATA_CLEAN_DIR / "clusters_municipios"
@@ -780,6 +790,7 @@ def build_tables() -> list[TableSpec]:
     era5 = build_era5()
     upra_conflicto = build_upra_conflicto()
     viabilidad_multidim = build_viabilidad_multidimensional()
+    rentabilidad = build_rentabilidad_municipal()
 
     tables = [
         TableSpec(
@@ -1262,6 +1273,27 @@ def build_tables() -> list[TableSpec]:
             type_overrides={"codigo_dane": "CHAR(5)"},
         ))
 
+    if rentabilidad is not None:
+        optional_tables.append(TableSpec(
+            name="rentabilidad_municipal",
+            df=rentabilidad,
+            primary_key=["codigo_dane"],
+            foreign_keys=[
+                ForeignKeySpec(["codigo_dane"], "municipios", ["codigo_dane"], "fk_rentabilidad_municipio")
+            ],
+            indexes=[
+                [column]
+                for column in [
+                    "score_rentabilidad",
+                    "score_rentabilidad_ajustada",
+                    "clasificacion_rentabilidad",
+                    "clasificacion_rentabilidad_ajustada",
+                ]
+                if column in rentabilidad.columns
+            ],
+            type_overrides={"codigo_dane": "CHAR(5)"},
+        ))
+
     return tables + optional_tables
 
 
@@ -1369,6 +1401,62 @@ LEFT JOIN viabilidad_multidimensional vm ON vm.codigo_dane = m.codigo_dane
 ORDER BY vm.v_i_multidimensional DESC;
 """.strip())
 
+    if "viabilidad_multidimensional" in table_names and "rentabilidad_municipal" in table_names:
+        views.append("""
+CREATE OR REPLACE VIEW `vw_powerbi_modelo` AS
+SELECT
+  m.codigo_dane,
+  m.municipio,
+  d.departamento,
+  m.categoria_nombre,
+  m.lon,
+  m.lat,
+  v.v_i_modelo_rural,
+  v.score_rural_con_bono_demanda,
+  v.clasificacion_preliminar,
+  v.pvout_kwh_kwp_day,
+  v.annual_yield_kwh_kw_year,
+  v.dist_subestacion_km,
+  v.pendiente_igac,
+  v.pct_area_protegida_runap,
+  v.tipo_capa_pot,
+  v.categoria_aptitud_pot,
+  v.zona_xm_demanda,
+  v.d_i_demanda,
+  c.cluster_kmeans,
+  c.cluster_kmeans_label,
+  c.silhouette_municipio,
+  vm.v_i_multidimensional,
+  vm.score_fisico,
+  vm.score_electrico,
+  vm.score_economico,
+  vm.score_agropecuario,
+  vm.score_riesgo,
+  vm.clasificacion_multidim,
+  CASE
+    WHEN vm.v_i_multidimensional >= 0.75 THEN 'Alta'
+    WHEN vm.v_i_multidimensional >= 0.50 THEN 'Media alta'
+    WHEN vm.v_i_multidimensional >= 0.25 THEN 'Media baja'
+    WHEN vm.v_i_multidimensional IS NULL THEN NULL
+    ELSE 'Baja'
+  END AS nivel_viabilidad,
+  r.generacion_kwh_ha_year,
+  r.ingreso_energia_cop_ha_year,
+  r.costo_total_estimado_cop_ha_year,
+  r.margen_estimado_cop_ha_year,
+  r.relacion_beneficio_costo_rentabilidad,
+  r.score_rentabilidad,
+  r.clasificacion_rentabilidad,
+  r.score_rentabilidad_ajustada,
+  r.clasificacion_rentabilidad_ajustada
+FROM municipios m
+JOIN departamentos d ON d.departamento_id = m.departamento_id
+LEFT JOIN viabilidad_municipal v ON v.codigo_dane = m.codigo_dane
+LEFT JOIN viabilidad_multidimensional vm ON vm.codigo_dane = m.codigo_dane
+LEFT JOIN cluster_municipal c ON c.codigo_dane = m.codigo_dane
+LEFT JOIN rentabilidad_municipal r ON r.codigo_dane = m.codigo_dane;
+""".strip())
+
     return "\n".join(views) + ("\n" if views else "")
 
 
@@ -1381,7 +1469,13 @@ def build_bootstrap_sql(database: str) -> str:
         "SET NAMES utf8mb4;",
         "SET FOREIGN_KEY_CHECKS = 0;",
     ]
-    for view_name in ["vw_subestaciones_municipios", "vw_municipal_contexto", "vw_dashboard_municipal"]:
+    for view_name in [
+        "vw_powerbi_modelo",
+        "vw_comparacion_scores",
+        "vw_subestaciones_municipios",
+        "vw_municipal_contexto",
+        "vw_dashboard_municipal",
+    ]:
         statements.append(f"DROP VIEW IF EXISTS `{view_name}`;")
     for table_name in reversed(ordered_table_names):
         statements.append(f"DROP TABLE IF EXISTS `{table_name}`;")
@@ -1409,7 +1503,13 @@ def reset_database(database: str, settings: MySQLSettings, tables: list[TableSpe
         f"USE `{database}`;",
         "SET FOREIGN_KEY_CHECKS = 0;",
     ]
-    for view_name in ["vw_subestaciones_municipios", "vw_municipal_contexto", "vw_dashboard_municipal"]:
+    for view_name in [
+        "vw_powerbi_modelo",
+        "vw_comparacion_scores",
+        "vw_subestaciones_municipios",
+        "vw_municipal_contexto",
+        "vw_dashboard_municipal",
+    ]:
         statements.append(f"DROP VIEW IF EXISTS `{view_name}`;")
     for table_name in reversed(ordered_table_names):
         statements.append(f"DROP TABLE IF EXISTS `{table_name}`;")

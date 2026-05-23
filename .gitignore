@@ -71,6 +71,7 @@ Thumbs.db
 desktop.ini
 .vscode/
 .idea/
+.claude/
 
 # Mantener estructura si se agregan placeholders
 !data/.gitkeep
