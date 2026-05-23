@@ -78,4 +78,12 @@ desktop.ini
 !data/clean/.gitkeep
 !data/interim/.gitkeep
 !notebooks/.gitkeep
+
+# Dataset minimo para Streamlit Cloud cuando no hay MySQL remoto
+!data/
+!data/clean/
+data/clean/*
+!data/clean/viabilidad_municipal/
+data/clean/viabilidad_municipal/*
+!data/clean/viabilidad_municipal/viabilidad_municipal_multidimensional.csv
 !src/.gitkeep
