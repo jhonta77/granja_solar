@@ -20,6 +20,11 @@ MULTIDIM_PATH = (
     / "data" / "clean" / "viabilidad_municipal"
     / "viabilidad_municipal_multidimensional.csv"
 )
+RENTABILIDAD_PATH = (
+    PROJECT_ROOT
+    / "data" / "clean" / "rentabilidad_municipal"
+    / "rentabilidad_municipal.csv"
+)
 
 # Carga .env si existe para tener credenciales MySQL disponibles
 try:
@@ -166,6 +171,15 @@ def load_data() -> tuple[pd.DataFrame, str]:
         df = pd.read_csv(MULTIDIM_PATH, dtype={"codigo_dane": "string"})
         fuente = "csv"
     return df.sort_values("v_i_multidimensional", ascending=False).reset_index(drop=True), fuente
+
+
+@st.cache_data(show_spinner=False)
+def load_rentabilidad() -> pd.DataFrame | None:
+    """Carga el CSV de rentabilidad pre-calculado. Retorna None si no existe."""
+    if not RENTABILIDAD_PATH.exists():
+        return None
+    df = pd.read_csv(RENTABILIDAD_PATH, dtype={"codigo_dane": "string"})
+    return df.sort_values("score_rentabilidad_ajustada", ascending=False).reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1749,6 +1763,404 @@ def render_viabilidad_financiera_tab(df: pd.DataFrame, top5: pd.DataFrame) -> No
 
 
 # ---------------------------------------------------------------------------
+# Pestaña rentabilidad
+# ---------------------------------------------------------------------------
+_RENT_COST_LABELS = {
+    "costo_capex_anual_cop_ha_year":       ("CAPEX anualizado",      "#EF4444"),
+    "costo_interconexion_cop_ha_year":     ("Interconexion red",     "#F97316"),
+    "costo_logistica_vias_cop_ha_year":    ("Logistica / vias",      "#EAB308"),
+    "costo_opex_cop_ha_year":              ("OPEX operacion",        "#84CC16"),
+    "costo_agua_limpieza_cop_ha_year":     ("Agua limpieza paneles", "#06B6D4"),
+    "costo_oportunidad_agro_cop_ha_year":  ("Costo oportunidad agro","#8B5CF6"),
+    "costo_riesgo_climatico_cop_ha_year":  ("Penalizacion riesgo",   "#EC4899"),
+}
+
+_RENT_CLASS_COLORS = {
+    "muy_alta": "#16A34A",
+    "alta":     "#2563EB",
+    "media":    "#D97706",
+    "baja":     "#DC2626",
+    "sin_datos":"#6B7280",
+}
+
+_RENT_COST_PCT_COLUMNS = {
+    "costo_capex_anual_cop_ha_year":       "pct_driver_capex",
+    "costo_interconexion_cop_ha_year":     "pct_driver_interconexion",
+    "costo_logistica_vias_cop_ha_year":    "pct_driver_logistica_vias",
+    "costo_opex_cop_ha_year":              "pct_driver_opex",
+    "costo_agua_limpieza_cop_ha_year":     "pct_driver_agua",
+    "costo_oportunidad_agro_cop_ha_year":  "pct_driver_oportunidad_agro",
+    "costo_riesgo_climatico_cop_ha_year":  "pct_driver_riesgo_climatico",
+}
+
+
+def _chart_rent_top10(top10: pd.DataFrame):
+    """Barras horizontales: score_rentabilidad_ajustada con color por clasificacion."""
+    import plotly.graph_objects as go
+
+    fig = go.Figure()
+    y_labels = [
+        f"#{i+1} {row['municipio']} ({row['departamento']})"
+        for i, (_, row) in enumerate(top10.iterrows())
+    ]
+    colors = [
+        _RENT_CLASS_COLORS.get(str(row.get("clasificacion_rentabilidad_ajustada", "sin_datos")), "#6B7280")
+        for _, row in top10.iterrows()
+    ]
+    scores = top10["score_rentabilidad_ajustada"].fillna(0).values.astype(float)
+    margenes = top10["margen_estimado_cop_ha_year"].fillna(0).values.astype(float)
+
+    fig.add_trace(go.Bar(
+        x=scores,
+        y=y_labels,
+        orientation="h",
+        marker_color=colors,
+        text=[f"{s:.3f}" for s in scores],
+        textposition="inside",
+        insidetextanchor="middle",
+        textfont=dict(color="white", size=13, family="Arial Black"),
+        hovertemplate=[
+            f"<b>{y_labels[i]}</b><br>"
+            f"Score rentabilidad: {scores[i]:.4f}<br>"
+            f"Margen estimado: {margenes[i]:,.0f} COP/ha/año<extra></extra>"
+            for i in range(len(y_labels))
+        ],
+    ))
+    fig.update_layout(
+        title=dict(
+            text="Top 10 municipios — Score de rentabilidad ajustada",
+            font=dict(size=16, color="#111827", family="Arial"),
+            x=0.5,
+        ),
+        xaxis=dict(
+            title="Score rentabilidad (0 – 1)",
+            range=[0, 1.1],
+            gridcolor="#E5E7EB",
+            tickfont=dict(size=12, color="#374151"),
+        ),
+        yaxis=dict(autorange="reversed", tickfont=dict(size=12, color="#111827")),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        height=420,
+        margin=dict(l=10, r=60, t=55, b=40),
+        showlegend=False,
+    )
+    _apply_readable_fonts(fig)
+    return fig
+
+
+def _chart_waterfall(row: pd.Series) -> object:
+    """Gráfica de cascada: ingreso → resta costos → margen."""
+    import plotly.graph_objects as go
+
+    ingreso = float(row.get("ingreso_energia_cop_ha_year", 0) or 0)
+    margen  = float(row.get("margen_estimado_cop_ha_year", 0) or 0)
+
+    measures = ["absolute"]
+    x_labels = ["Ingreso energia"]
+    y_values = [ingreso]
+
+    for col, (label, _) in _RENT_COST_LABELS.items():
+        val = float(row.get(col, 0) or 0)
+        if val > 0:
+            measures.append("relative")
+            x_labels.append(label)
+            y_values.append(-val)
+
+    measures.append("total")
+    x_labels.append("Margen neto")
+    y_values.append(0)
+
+    colors = []
+    for m, v in zip(measures, y_values):
+        if m == "absolute":
+            colors.append("#2563EB")
+        elif m == "total":
+            colors.append("#16A34A" if margen >= 0 else "#DC2626")
+        else:
+            colors.append("#EF4444")
+
+    fig = go.Figure(go.Waterfall(
+        orientation="v",
+        measure=measures,
+        x=x_labels,
+        y=y_values,
+        connector=dict(line=dict(color="#9CA3AF", width=1.5, dash="dot")),
+        decreasing=dict(marker_color="#EF4444"),
+        increasing=dict(marker_color="#2563EB"),
+        totals=dict(marker_color="#16A34A" if margen >= 0 else "#DC2626"),
+        text=[f"{abs(v)/1_000_000:.2f}M" for v in y_values],
+        textposition="outside",
+        textfont=dict(size=12, color="#111827", family="Arial"),
+        hovertemplate="%{x}<br>%{y:,.0f} COP/ha/año<extra></extra>",
+    ))
+    fig.update_layout(
+        title=dict(
+            text=f"Cascada de ingresos y costos — {row.get('municipio', '')} ({row.get('departamento', '')})",
+            font=dict(size=14, color="#111827", family="Arial"),
+            x=0.5,
+        ),
+        yaxis=dict(title="COP / ha / año", tickformat=",.0f", tickfont=dict(size=11, color="#374151")),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        height=420,
+        margin=dict(l=10, r=10, t=55, b=60),
+        showlegend=False,
+    )
+    _apply_readable_fonts(fig)
+    return fig
+
+
+def _chart_drivers_pie(row: pd.Series) -> object:
+    """Pie chart de los drivers de costo (% de cada componente)."""
+    import plotly.graph_objects as go
+
+    labels, values, colors = [], [], []
+    for col, (label, color) in _RENT_COST_LABELS.items():
+        pct_col = _RENT_COST_PCT_COLUMNS[col]
+        val = float(row.get(pct_col, 0) or 0)
+        if val > 0:
+            labels.append(label)
+            values.append(val)
+            colors.append(color)
+
+    if not values:
+        return None
+
+    fig = go.Figure(go.Pie(
+        labels=labels,
+        values=values,
+        marker_colors=colors,
+        hole=0.38,
+        textinfo="label+percent",
+        textfont=dict(size=12, color="#111827", family="Arial"),
+        hovertemplate="%{label}<br>%{value:.1f}% del total<extra></extra>",
+    ))
+    fig.update_layout(
+        title=dict(
+            text="Composicion de costos",
+            font=dict(size=14, color="#111827", family="Arial"),
+            x=0.5,
+        ),
+        paper_bgcolor="white",
+        height=380,
+        margin=dict(l=10, r=10, t=55, b=20),
+        showlegend=False,
+    )
+    _apply_readable_fonts(fig)
+    return fig
+
+
+def _chart_viab_vs_rent(df_r: pd.DataFrame) -> object:
+    """Scatter: score multidimensional vs score rentabilidad para todos los municipios."""
+    import plotly.graph_objects as go
+
+    x = pd.to_numeric(df_r["v_i_multidimensional"], errors="coerce")
+    y = pd.to_numeric(df_r["score_rentabilidad_ajustada"], errors="coerce")
+    valid = x.notna() & y.notna()
+    x, y = x[valid], y[valid]
+    names = df_r.loc[valid, "municipio"].values
+    depts = df_r.loc[valid, "departamento"].values
+
+    fig = go.Figure(go.Scatter(
+        x=x, y=y,
+        mode="markers",
+        marker=dict(size=5, color="#2563EB", opacity=0.45),
+        hovertemplate=[
+            f"<b>{n}</b> ({d})<br>Viabilidad: {xi:.3f}<br>Rentabilidad: {yi:.3f}<extra></extra>"
+            for n, d, xi, yi in zip(names, depts, x, y)
+        ],
+    ))
+    fig.update_layout(
+        title=dict(
+            text="Viabilidad vs Rentabilidad — todos los municipios",
+            font=dict(size=14, color="#111827", family="Arial"),
+            x=0.5,
+        ),
+        xaxis=dict(title="Score viabilidad multidimensional", range=[0, 1], gridcolor="#E5E7EB"),
+        yaxis=dict(title="Score rentabilidad ajustada", range=[0, 1], gridcolor="#E5E7EB"),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        height=400,
+        margin=dict(l=10, r=10, t=55, b=40),
+        showlegend=False,
+    )
+    _apply_readable_fonts(fig)
+    return fig
+
+
+def render_rentabilidad_tab(df_r: pd.DataFrame) -> None:
+    import plotly.graph_objects as go
+
+    st.subheader("Municipios mas rentables para una granja solar")
+    st.caption(
+        "Score de rentabilidad estimada por hectarea. Combina margen neto (70%) y relacion "
+        "beneficio/costo (30%), ajustado por la restriccion territorial (R_i). "
+        "**No es un VPN/TIR bancable** — es un ranking relativo basado en supuestos uniformes."
+    )
+
+    # ── Metricas resumen ──────────────────────────────────────────────────────
+    top1 = df_r.iloc[0]
+    med_margen  = df_r["margen_estimado_cop_ha_year"].median()
+    n_positivos = (df_r["margen_estimado_cop_ha_year"] > 0).sum()
+    n_muy_alta  = (df_r["clasificacion_rentabilidad_ajustada"] == "muy_alta").sum()
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(
+        "Municipio mas rentable",
+        top1["municipio"],
+        f"Score {float(top1['score_rentabilidad_ajustada']):.3f}",
+    )
+    c2.metric(
+        "Margen mediano estimado",
+        f"{med_margen:,.0f} COP/ha/año",
+        help="Mediana del margen neto estimado por hectarea al año entre todos los municipios.",
+    )
+    c3.metric(
+        "Municipios con margen positivo",
+        f"{n_positivos:,}",
+        f"de {len(df_r):,} totales",
+    )
+    c4.metric(
+        "Clasificacion muy_alta",
+        f"{n_muy_alta:,} municipios",
+        help="Municipios en el percentil 90+ de score de rentabilidad ajustada.",
+    )
+
+    st.divider()
+
+    # ── Top 10 ranking ────────────────────────────────────────────────────────
+    st.markdown("### Top 10 — ranking de rentabilidad")
+    top10 = df_r.head(10).reset_index(drop=True)
+    fig_top = _chart_rent_top10(top10)
+    st.plotly_chart(fig_top, use_container_width=True)
+
+    # Tabla resumen top 10
+    cols_tabla = [
+        "municipio", "departamento",
+        "score_rentabilidad_ajustada", "clasificacion_rentabilidad_ajustada",
+        "margen_estimado_cop_ha_year", "ingreso_energia_cop_ha_year",
+        "costo_total_estimado_cop_ha_year", "relacion_beneficio_costo_rentabilidad",
+        "v_i_multidimensional",
+    ]
+    rename_map = {
+        "municipio":                           "Municipio",
+        "departamento":                        "Departamento",
+        "score_rentabilidad_ajustada":         "Score rent.",
+        "clasificacion_rentabilidad_ajustada": "Clasificacion",
+        "margen_estimado_cop_ha_year":         "Margen (COP/ha/año)",
+        "ingreso_energia_cop_ha_year":         "Ingreso energia (COP/ha/año)",
+        "costo_total_estimado_cop_ha_year":    "Costo total (COP/ha/año)",
+        "relacion_beneficio_costo_rentabilidad":"B/C",
+        "v_i_multidimensional":                "Score viabilidad",
+    }
+    available_cols = [c for c in cols_tabla if c in df_r.columns]
+    tabla_top10 = (
+        top10[available_cols]
+        .rename(columns=rename_map)
+        .round(4)
+    )
+    st.dataframe(tabla_top10, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ── Desglose por municipio ────────────────────────────────────────────────
+    st.markdown("### Desglose detallado por municipio")
+
+    mun_options = df_r["municipio"].tolist()
+    mun_sel = st.selectbox(
+        "Selecciona un municipio para ver su desglose financiero",
+        mun_options,
+        index=0,
+        key="rent_mun_sel",
+    )
+    row_sel = df_r[df_r["municipio"] == mun_sel].iloc[0]
+
+    # Métricas del municipio seleccionado
+    ingreso    = float(row_sel.get("ingreso_energia_cop_ha_year", 0) or 0)
+    costo_tot  = float(row_sel.get("costo_total_estimado_cop_ha_year", 0) or 0)
+    margen     = float(row_sel.get("margen_estimado_cop_ha_year", 0) or 0)
+    bc_ratio   = float(row_sel.get("relacion_beneficio_costo_rentabilidad", 0) or 0)
+    score_rent = float(row_sel.get("score_rentabilidad_ajustada", 0) or 0)
+    clasif     = str(row_sel.get("clasificacion_rentabilidad_ajustada", "—"))
+
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric("Ingreso energia", f"{ingreso:,.0f} COP/ha/año")
+    mc2.metric("Costo total",     f"{costo_tot:,.0f} COP/ha/año")
+    mc3.metric(
+        "Margen neto",
+        f"{margen:,.0f} COP/ha/año",
+        delta=f"{'positivo' if margen >= 0 else 'negativo'}",
+        delta_color="normal" if margen >= 0 else "inverse",
+    )
+    mc4.metric(
+        "Relacion B/C",
+        f"{bc_ratio:.2f}",
+        help="Ingreso / Costo total. >1 significa que genera mas de lo que cuesta.",
+    )
+
+    st.caption(
+        f"Score rentabilidad: **{score_rent:.4f}** · Clasificacion: **{clasif}** · "
+        f"Score viabilidad multidim: **{float(row_sel.get('v_i_multidimensional', 0) or 0):.4f}**"
+    )
+
+    col_wf, col_pie = st.columns([3, 2])
+    with col_wf:
+        fig_wf = _chart_waterfall(row_sel)
+        st.plotly_chart(fig_wf, use_container_width=True)
+    with col_pie:
+        fig_pie = _chart_drivers_pie(row_sel)
+        if fig_pie:
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+    # Tabla detallada de componentes
+    with st.expander("Ver tabla completa de componentes de costo e ingreso"):
+        comp_rows = [{"Componente": "Ingreso energia", "COP/ha/año": ingreso, "Tipo": "Ingreso"}]
+        for col, (label, _) in _RENT_COST_LABELS.items():
+            val = float(row_sel.get(col, 0) or 0)
+            pct_col = _RENT_COST_PCT_COLUMNS[col]
+            pct = float(row_sel.get(pct_col, 0) or 0)
+            comp_rows.append({"Componente": label, "COP/ha/año": -val, "% del total costos": f"{pct:.1f}%", "Tipo": "Costo"})
+        comp_rows.append({"Componente": "MARGEN NETO", "COP/ha/año": margen, "Tipo": "Total"})
+        st.dataframe(pd.DataFrame(comp_rows).round(0), use_container_width=True, hide_index=True)
+
+    # Supuestos usados
+    with st.expander("Supuestos del modelo de rentabilidad"):
+        sup = {
+            "PPA (precio venta energia)": f"{float(row_sel.get('precio_venta_energia_cop_kwh', 160) or 160):,.0f} COP/kWh",
+            "TRM":                        f"{float(row_sel.get('supuesto_trm_cop_usd', 4000) or 4000):,.0f} COP/USD",
+            "WACC":                       f"{float(row_sel.get('supuesto_wacc', 0.08) or 0.08):.1%}",
+            "Vida util proyecto":         f"{int(row_sel.get('supuesto_vida_util_anios', 25) or 25)} años",
+            "Area proyecto (prorrateo)":  f"{float(row_sel.get('supuesto_area_proyecto_ha', 100) or 100):,.0f} ha",
+            "CAPEX":                      f"{float(row_sel.get('supuesto_capex_cop_ha', 0) or 0):,.0f} COP/ha",
+            "Capacidad instalada":        f"{float(row_sel.get('supuesto_capacidad_kw_ha', 0) or 0):,.1f} kW/ha",
+        }
+        st.table(pd.DataFrame(list(sup.items()), columns=["Supuesto", "Valor"]))
+        st.caption(
+            "El ingreso se calcula como: generacion_kwh_ha_año × PPA. "
+            "El CAPEX se anualiza con el factor de recuperacion de capital (CRF = WACC / (1-(1+WACC)^-n)). "
+            "El costo de interconexion se prorratea entre el area del proyecto."
+        )
+
+    st.divider()
+
+    # ── Scatter viabilidad vs rentabilidad ───────────────────────────────────
+    st.markdown("### Viabilidad vs Rentabilidad — panorama general")
+    st.caption(
+        "Cada punto es un municipio. Los mejores candidatos estan arriba a la derecha: "
+        "alta viabilidad fisica/electrica Y alta rentabilidad estimada."
+    )
+    fig_scatter = _chart_viab_vs_rent(df_r)
+    st.plotly_chart(fig_scatter, use_container_width=True)
+
+    st.info(
+        "**Interpretacion:** Un municipio puede tener score de viabilidad alto pero rentabilidad baja "
+        "(ej. tierra cara, lejos de vias) o viceversa. La rentabilidad captura los costos economicos "
+        "que el score multidimensional no pondera directamente."
+    )
+
+
+# ---------------------------------------------------------------------------
 # App principal
 # ---------------------------------------------------------------------------
 def main() -> None:
@@ -1786,11 +2198,14 @@ def main() -> None:
     top5 = df.head(5).reset_index(drop=True)
     numero1 = top5.iloc[0]
 
-    tab_ranking, tab_raw, tab_agro, tab_fin = st.tabs([
+    df_rent = load_rentabilidad()
+
+    tab_ranking, tab_raw, tab_agro, tab_fin, tab_rent = st.tabs([
         "Ranking",
         "Variables crudas por dimension",
         "Beneficio Agrivoltaico",
         "Viabilidad Financiera",
+        "💰 Rentabilidad",
     ])
 
     with tab_raw:
@@ -1804,6 +2219,15 @@ def main() -> None:
 
     with tab_ranking:
         render_ranking_tab(df, top5, numero1)
+
+    with tab_rent:
+        if df_rent is not None:
+            render_rentabilidad_tab(df_rent)
+        else:
+            st.warning(
+                "No se encontro el archivo de rentabilidad. "
+                "Ejecuta primero: `python -m src.scoring.rentabilidad_municipal`"
+            )
 
     st.caption(
         "Datos: NASA Power · IGAC · UPME · RUNAP · UPRA · EVA-ICA · IMRC DNP · SUI · INVIAS. "
