@@ -152,6 +152,24 @@ def _load_from_mysql() -> pd.DataFrame | None:
         return None
 
 
+def _sanitize_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Convierte tipos pandas nullable (StringDtype, Float64, etc.) a tipos
+    NumPy estandar para que pyarrow pueda serializar sin errores en st.cache_data
+    y st.dataframe."""
+    for col in df.columns:
+        # StringDtype → object (str) evita ArrowInvalid con pd.NA
+        if hasattr(df[col], "dtype") and str(df[col].dtype) in ("string", "StringDtype"):
+            df[col] = df[col].astype(object)
+        # Float64 nullable → float64
+        elif hasattr(df[col], "dtype") and str(df[col].dtype) == "Float64":
+            df[col] = df[col].astype("float64")
+        # Int64 nullable → Int64 numpy (o float64 si hay NAs)
+        elif hasattr(df[col], "dtype") and str(df[col].dtype) in ("Int8","Int16","Int32","Int64",
+                                                                    "UInt8","UInt16","UInt32","UInt64"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
 @st.cache_data(show_spinner=False)
 def load_data() -> tuple[pd.DataFrame, str]:
     """Carga datos del scoring multidimensional. Prioridad: MySQL → CSV.
@@ -168,8 +186,9 @@ def load_data() -> tuple[pd.DataFrame, str]:
                 f"  1. Conexion MySQL (.env con MYSQL_USER/MYSQL_PASSWORD) o\n"
                 f"  2. Archivo CSV en {MULTIDIM_PATH}"
             )
-        df = pd.read_csv(MULTIDIM_PATH, dtype={"codigo_dane": "string"})
+        df = pd.read_csv(MULTIDIM_PATH, dtype={"codigo_dane": str})
         fuente = "csv"
+    df = _sanitize_df(df)
     return df.sort_values("v_i_multidimensional", ascending=False).reset_index(drop=True), fuente
 
 
@@ -178,7 +197,8 @@ def load_rentabilidad() -> pd.DataFrame | None:
     """Carga el CSV de rentabilidad pre-calculado. Retorna None si no existe."""
     if not RENTABILIDAD_PATH.exists():
         return None
-    df = pd.read_csv(RENTABILIDAD_PATH, dtype={"codigo_dane": "string"})
+    df = pd.read_csv(RENTABILIDAD_PATH, dtype={"codigo_dane": str})
+    df = _sanitize_df(df)
     return df.sort_values("score_rentabilidad_ajustada", ascending=False).reset_index(drop=True)
 
 
