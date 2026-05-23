@@ -87,4 +87,7 @@ data/clean/*
 !data/clean/viabilidad_municipal/
 data/clean/viabilidad_municipal/*
 !data/clean/viabilidad_municipal/viabilidad_municipal_multidimensional.csv
+!data/clean/rentabilidad_municipal/
+data/clean/rentabilidad_municipal/*
+!data/clean/rentabilidad_municipal/rentabilidad_municipal.csv
 !src/.gitkeep
