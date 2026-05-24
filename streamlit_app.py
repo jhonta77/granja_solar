@@ -2178,11 +2178,17 @@ def _dcf_params(
     degradacion: float,
     wacc: float,
     n: int,
+    ppa_escal: float = 0.0,
 ) -> dict:
-    """DCF año por año. La parte solar degrada; el resto (ganado, OPEX fijo) es constante."""
+    """DCF año por año.
+    - La parte solar degrada al 0.5%/año Y escala con ppa_escal (%/año).
+    - El ingreso ganadero y el OPEX son constantes (precios reales).
+    - ppa_escal: tasa anual de escalacion del PPA (ej. 0.053 = 5.3%).
+    """
     flujos = []
     for t in range(1, n + 1):
-        solar_t = ingreso_solar_yr1 * (1 - degradacion) ** (t - 1)
+        # Degradacion reduce la generacion; escalacion sube el precio del kWh
+        solar_t = ingreso_solar_yr1 * (1 - degradacion) ** (t - 1) * (1 + ppa_escal) ** (t - 1)
         fcf_t   = solar_t + otros_ingresos_yr1 - opex_yr1
         flujos.append(fcf_t)
 
@@ -2238,11 +2244,12 @@ def _ppa_breakeven(
     degradacion: float,
     wacc: float,
     n: int,
+    ppa_escal: float = 0.0,
 ) -> float | None:
-    """PPA (COP/kWh) en que VPN = 0. Devuelve None si no converge."""
+    """PPA inicial (COP/kWh) en que VPN = 0. Devuelve None si no converge."""
     def _vpn(ppa: float) -> float:
         solar_yr1 = kw_ha * yield_kwh_kwp * ppa  # COP/ha/año
-        dcf = _dcf_params(capex_cop_ha, solar_yr1, otros_ingresos, opex_fijo, degradacion, wacc, n)
+        dcf = _dcf_params(capex_cop_ha, solar_yr1, otros_ingresos, opex_fijo, degradacion, wacc, n, ppa_escal)
         return dcf["vpn"]
 
     if _vpn(10) > 0:   # incluso a PPA=10 es rentable
@@ -2331,15 +2338,16 @@ def _chart_vpn_vs_ppa(
     capex_b: float, kw_b: float, yield_b: float, otros_b: float, opex_b: float,
     degradacion: float, wacc: float, n: int,
     ppa_actual: float,
+    ppa_escal: float = 0.0,
 ) -> object:
-    """Curva VPN vs PPA para ambos escenarios. Muestra punto de cruce con cero."""
+    """Curva VPN vs PPA inicial para ambos escenarios."""
     import plotly.graph_objects as go
 
     ppas = list(range(100, 401, 5))
     vpns_a, vpns_b = [], []
     for p in ppas:
-        da = _dcf_params(capex_a, kw_a * yield_a * p, otros_a, opex_a, degradacion, wacc, n)
-        db = _dcf_params(capex_b, kw_b * yield_b * p, otros_b, opex_b, degradacion, wacc, n)
+        da = _dcf_params(capex_a, kw_a * yield_a * p, otros_a, opex_a, degradacion, wacc, n, ppa_escal)
+        db = _dcf_params(capex_b, kw_b * yield_b * p, otros_b, opex_b, degradacion, wacc, n, ppa_escal)
         vpns_a.append(da["vpn"] / 1e6)
         vpns_b.append(db["vpn"] / 1e6)
 
@@ -2405,13 +2413,34 @@ def render_comparativo_tab() -> None:
     # ── Parametros compartidos ────────────────────────────────────────────────
     st.markdown("### Parametros compartidos")
     pc1, pc2, pc3, pc4 = st.columns(4)
-    ppa   = pc1.slider("PPA — precio energia (COP/kWh)", 100, 400, 160, 5,
-                        help="Precio al que se vende cada kWh a la red o al cliente final.")
-    wacc  = pc2.slider("WACC — tasa descuento (%)", 5, 20, 8, 1,
-                        help="Costo de oportunidad del capital propio invertido.") / 100
+    ppa    = pc1.slider("PPA inicial (COP/kWh)", 100, 400, 160, 5,
+                         help="Precio al que se vende cada kWh en el año 1. Con escalacion, sube cada año.")
+    wacc   = pc2.slider("WACC — tasa descuento (%)", 5, 20, 8, 1,
+                         help="Costo de oportunidad del capital propio invertido.") / 100
     n_años = pc3.slider("Vida util del proyecto (años)", 10, 35, 25, 1)
-    trm   = pc4.slider("TRM (COP/USD)", 3_500, 6_000, 4_000, 50,
-                        help="Tasa Representativa del Mercado. Afecta el CAPEX ya que los paneles son importados.")
+    trm    = pc4.slider("TRM (COP/USD)", 3_500, 6_000, 4_000, 50,
+                         help="Tasa Representativa del Mercado. Afecta el CAPEX ya que los paneles son importados.")
+
+    pc5, pc6 = st.columns([2, 4])
+    ppa_escal = pc5.slider(
+        "Escalacion anual del PPA (%/año)", 0.0, 10.0, 0.0, 0.1,
+        help=(
+            "Tasa a la que sube el precio de venta de la energia cada año. "
+            "0% = precio fijo (modelo en precios constantes). "
+            "5.3% = indexado a la inflacion promedio de Colombia (2021-2024). "
+            "Ejemplo: PPA año 5 = 160 × (1.053)⁴ = 196 COP/kWh."
+        ),
+        key="ppa_escal_slider",
+    ) / 100
+    pc6.info(
+        f"Con escalacion **{ppa_escal*100:.1f}%/año**: "
+        f"PPA año 5 = **{ppa*(1+ppa_escal)**4:.0f}** COP/kWh · "
+        f"año 10 = **{ppa*(1+ppa_escal)**9:.0f}** COP/kWh · "
+        f"año 25 = **{ppa*(1+ppa_escal)**24:.0f}** COP/kWh"
+        if ppa_escal > 0 else
+        "Escalacion en **0%** — modelo en precios constantes (reales). "
+        "Sube el slider para simular que el PPA crece con la inflacion cada año."
+    )
     degradacion = 0.005   # 0.5%/año, fijo
 
     st.divider()
@@ -2424,8 +2453,9 @@ def render_comparativo_tab() -> None:
         st.markdown("#### 🌿 A — Agrivoltaico (NREL/IRENA)")
         kw_ha_a     = st.number_input("Potencia instalada (kW/ha)", 100.0, 600.0, 312.8, 10.0,
                                        key="kw_a", help="Base: 7.9 acres/MW segun NREL.")
-        capex_usd_a = st.number_input("CAPEX (USD/kW)", 300.0, 1_200.0, 599.0, 10.0,
-                                       key="capex_a", help="IRENA 2025 proyeccion Colombia.")
+        capex_usd_a = st.number_input("CAPEX (USD/kW)", 300.0, 1_200.0, 700.0, 10.0,
+                                       key="capex_a",
+                                       help="Base IRENA 2025: $599/kW estructura plana + ~17% por estructura elevada (2-4 m) que requiere el agrivoltaico para que el ganado circule = $700/kW.")
         yield_kwh_a = st.number_input("Rendimiento (kWh/kWp/año)", 800.0, 2_500.0, 1_478.0, 10.0,
                                        key="yield_a", help="PVOUT promedio Colombia — World Bank/ESMAP.")
         ganado_m    = st.number_input("Ingreso ganadero (M COP/ha/año)", 0.0, 30.0, 3.6, 0.1,
@@ -2444,9 +2474,9 @@ def render_comparativo_tab() -> None:
         kw_ha_b     = st.number_input("Potencia instalada (kW/ha)", 300.0, 1_500.0, 950.0, 10.0,
                                        key="kw_b",
                                        help="Gemini: 1,350 paneles × 700W = 945 kWp ~ 950 kWp/ha.")
-        capex_usd_b = st.number_input("CAPEX (USD/kW)", 300.0, 1_500.0, 800.0, 10.0,
+        capex_usd_b = st.number_input("CAPEX (USD/kW)", 300.0, 1_500.0, 599.0, 10.0,
                                        key="capex_b",
-                                       help="Gemini: $0.75-0.85/W. Usamos el punto medio $0.80/W.")
+                                       help="IRENA 2025 proyeccion Colombia: $599/kW para instalacion ground-mount estandar. Misma fuente que A; el costo por kW es igual — la diferencia de CAPEX/ha viene de instalar mas kW/ha.")
         yield_kwh_b = st.number_input("Rendimiento (kWh/kWp/año)", 800.0, 2_500.0, 1_420.0, 10.0,
                                        key="yield_b",
                                        help="Ligeramente menor que A por mayor GCR (~0.60): sombras entre filas reducen ~3-4% el rendimiento por panel.")
@@ -2466,7 +2496,7 @@ def render_comparativo_tab() -> None:
     opex_a          = capex_cop_a * opex_pct_a + opex_agro_m * 1e6  # COP/ha/año
     fcf_yr1_a       = solar_yr1_a + ganado_cop_a - opex_a
 
-    dcf_a = _dcf_params(capex_cop_a, solar_yr1_a, ganado_cop_a, opex_a, degradacion, wacc, n_años)
+    dcf_a = _dcf_params(capex_cop_a, solar_yr1_a, ganado_cop_a, opex_a, degradacion, wacc, n_años, ppa_escal)
 
     # Escenario B
     capex_cop_b     = kw_ha_b * capex_usd_b * trm               # COP/ha
@@ -2475,11 +2505,11 @@ def render_comparativo_tab() -> None:
     opex_b          = capex_cop_b * opex_pct_b + mant_m * 1e6   # COP/ha/año
     fcf_yr1_b       = solar_yr1_b - opex_b
 
-    dcf_b = _dcf_params(capex_cop_b, solar_yr1_b, otros_b, opex_b, degradacion, wacc, n_años)
+    dcf_b = _dcf_params(capex_cop_b, solar_yr1_b, otros_b, opex_b, degradacion, wacc, n_años, ppa_escal)
 
-    # Puntos de equilibrio PPA
-    be_a = _ppa_breakeven(capex_cop_a, kw_ha_a, yield_kwh_a, ganado_cop_a, opex_a, degradacion, wacc, n_años)
-    be_b = _ppa_breakeven(capex_cop_b, kw_ha_b, yield_kwh_b, otros_b, opex_b, degradacion, wacc, n_años)
+    # Puntos de equilibrio PPA (con la misma escalacion activa)
+    be_a = _ppa_breakeven(capex_cop_a, kw_ha_a, yield_kwh_a, ganado_cop_a, opex_a, degradacion, wacc, n_años, ppa_escal)
+    be_b = _ppa_breakeven(capex_cop_b, kw_ha_b, yield_kwh_b, otros_b, opex_b, degradacion, wacc, n_años, ppa_escal)
 
     # ── Metricas lado a lado ───────────────────────────────────────────────────
     st.markdown("### Resultados financieros (por hectarea)")
@@ -2576,7 +2606,7 @@ def render_comparativo_tab() -> None:
     fig_sens = _chart_vpn_vs_ppa(
         capex_cop_a, kw_ha_a, yield_kwh_a, ganado_cop_a, opex_a,
         capex_cop_b, kw_ha_b, yield_kwh_b, otros_b, opex_b,
-        degradacion, wacc, n_años, ppa,
+        degradacion, wacc, n_años, ppa, ppa_escal,
     )
     st.plotly_chart(fig_sens, use_container_width=True)
 
