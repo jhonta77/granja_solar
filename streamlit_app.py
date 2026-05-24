@@ -872,10 +872,14 @@ _AGUA_M3_POR_MWH  = 0.098  # NREL: litros de lavado (m³/MWh)
 # ── CONGRUENCIA: estos valores se usan igual en Agrivoltaico, Financiera y Comparativo ──
 _DEFAULT_PRECIO_ENERGIA = 200       # COP/kWh — PPA bilateral solar Colombia 2024 (rango mercado: 180-260)
 _DEFAULT_PRECIO_CARNE   = 10_000    # COP/kg carne viva en pie (novillo gordo Colombia 2024)
-_DEFAULT_UGG_AGRO       = 4.0       # UGG/ha bajo paneles — equivalente a 6 vacas/ha (promedio 300-350 kg c/u ≈ 0.67 UGG)
-                                    # La sombra de los paneles mejora el pasto en tropico calido (AGROSAVIA)
+_DEFAULT_UGG_AGRO       = 4.0       # UGG/ha bajo paneles (solo para tab Beneficio Agrivoltaico — calculo comparativo puro vs tradicional)
 _DEFAULT_UGG_TRAD       = 1.5       # UGG/ha sistema tradicional sin sombra (tropico bajo)
 _DEFAULT_TARIFA_AGUA    = 1_800     # COP/m³ default (mediana SUI)
+
+# ── Modelo ganadero UNIFICADO: mismo en Financiera y Comparativo ──────────────
+_DEFAULT_VACAS_HA              = 6.0         # cabezas/ha bajo paneles agrivoltaicos
+_DEFAULT_INGRESO_NETO_VACA_COP = 600_000     # COP/vaca/año NETO (despues de alimentacion, veterinario, sal mineral)
+# Resultado: 6 × 600,000 = 3,600,000 COP/ha/año = 3.6 M COP/ha/año
 
 
 def _calcular_agrovoltaico(df: pd.DataFrame, params: dict) -> pd.DataFrame:
@@ -1289,9 +1293,13 @@ def _viabilidad_financiera(row: "pd.Series", params: dict) -> dict:
     # ---------- INGRESOS ----------
     # mwh esta en MWh, precio_energia en COP/kWh -> convertir MWh a kWh (x1000)
     i_solar  = mwh * 1000 * params["precio_energia"] / 1e6
-    bovinos  = ha * params["ugg_agro"]
-    i_ganado = bovinos * _KG_CARNE_UGG_AÑO * params["precio_carne"] / 1e6
-    i_total  = i_solar + i_ganado
+
+    # Ingreso ganadero NETO unificado: vacas/ha × ingreso neto/vaca
+    # Mismo modelo que pestaña Comparativo: 6 vacas × 600,000 COP = 3.6 M COP/ha/año
+    vacas_ha   = params.get("vacas_ha", _DEFAULT_VACAS_HA)
+    ingreso_vaca = params.get("ingreso_neto_vaca_cop", _DEFAULT_INGRESO_NETO_VACA_COP)
+    i_ganado   = ha * vacas_ha * ingreso_vaca / 1e6   # ya es NETO — no se descuenta nada mas
+    i_total    = i_solar + i_ganado
 
     # ---------- COSTOS OPERATIVOS ----------
     agua_m3      = mwh * _AGUA_M3_POR_MWH
@@ -1299,8 +1307,8 @@ def _viabilidad_financiera(row: "pd.Series", params: dict) -> dict:
     c_oym_solar  = params["oym_pct"] / 100 * _CAPEX_M_COP_POR_MW * mw      # % del CAPEX paneles
     n_emp_om     = max(1.0, params["om_per_mw"] * mw)                        # minimo 1 empleado
     c_empleados  = n_emp_om * params["salario_mensual"] * 12 * _PRESTACIONES / 1e6
-    c_ganadero   = params["costo_ganadero_pct"] / 100 * i_ganado             # vet, suplementacion
-    c_operativos = c_agua + c_oym_solar + c_empleados + c_ganadero
+    c_ganadero   = 0.0   # ya incluido en i_ganado como valor neto; no descontar doble
+    c_operativos = c_agua + c_oym_solar + c_empleados
 
     ebitda = i_total - c_operativos
 
@@ -1334,6 +1342,9 @@ def _viabilidad_financiera(row: "pd.Series", params: dict) -> dict:
     ha_min_viable = -ebit / ebit_por_ha + ha if ebit_por_ha != 0 and ebit < 0 else (
         ha * 0.1 if ebit > 0 else float("inf")
     )
+
+    # Bovinos (model unificado: vacas/ha bajo paneles)
+    bovinos = ha * vacas_ha
 
     # Empleos
     emp_om_directos  = params["om_per_mw"] * mw
@@ -1387,14 +1398,6 @@ def render_viabilidad_financiera_tab(df: pd.DataFrame, top5: pd.DataFrame) -> No
         tarifa = float(pd.to_numeric(row.get("tarifa_acueducto_m3_cop", 0), errors="coerce") or 0)
         if 500 <= tarifa <= 5000:
             st.session_state["fin_s_tarifa"] = int(tarifa)
-        ugg_val = 0.0
-        for col in ["carga_bovina_ua_ha", "ugg_ha_proxy"]:
-            v = float(pd.to_numeric(row.get(col, 0), errors="coerce") or 0)
-            if v > 0:
-                ugg_val = v
-                break
-        if ugg_val > 0:
-            st.session_state["fin_s_ugg"] = round(min(4.0, max(1.0, ugg_val * 1.3)), 1)
 
     mun_sel = st.selectbox(
         "Municipio a analizar",
@@ -1412,20 +1415,11 @@ def render_viabilidad_financiera_tab(df: pd.DataFrame, top5: pd.DataFrame) -> No
         tarifa_real      = float(pd.to_numeric(rm.get("tarifa_acueducto_m3_cop", 0), errors="coerce") or 0)
         pvout_real       = float(pd.to_numeric(rm.get("pvout_kwh_kwp_day", 0), errors="coerce") or 0)
         precio_tierra_r  = float(pd.to_numeric(rm.get("precio_tierra_ha_cop", 0), errors="coerce") or 0)
-        ugg_real = 0.0
-        for col in ["carga_bovina_ua_ha", "ugg_ha_proxy"]:
-            v = float(pd.to_numeric(rm.get(col, 0), errors="coerce") or 0)
-            if v > 0:
-                ugg_real = v
-                break
         datos_ok = []
         if tarifa_real > 0:
             datos_ok.append(f"tarifa agua: **{tarifa_real:,.0f} COP/m³**")
         if pvout_real > 0:
             datos_ok.append(f"PVOUT: **{pvout_real:.3f} kWh/kWp/dia**")
-        if ugg_real > 0:
-            ugg_sug = round(min(4.0, max(1.0, ugg_real * 1.3)), 1)
-            datos_ok.append(f"carga ganadera: **{ugg_real:.2f} UGG/ha** → agrivoltaico sugerido: **{ugg_sug} UGG/ha**")
         if precio_tierra_r > 0:
             datos_ok.append(f"precio tierra: **{precio_tierra_r:,.0f} COP/ha**")
         if datos_ok:
@@ -1446,8 +1440,11 @@ def render_viabilidad_financiera_tab(df: pd.DataFrame, top5: pd.DataFrame) -> No
             ),
             key="fin_s_precio_e",
         )
-        precio_carne    = r1c2.slider("Precio carne viva (COP/kg)", 6_000, 14_000, _DEFAULT_PRECIO_CARNE, 500, key="fin_s_carne")
-        ugg_agro        = r1c3.slider("Carga agrivoltaica (UGG/ha) *", 1.0, 4.0, _DEFAULT_UGG_AGRO, 0.1, key="fin_s_ugg")
+        vacas_ha        = r1c2.slider("Vacas/ha bajo paneles", 2.0, 10.0, _DEFAULT_VACAS_HA, 1.0, key="fin_s_vacas_ha",
+                                       help="Numero de vacas por hectarea bajo los paneles solares. Modelo: 6 vacas/ha segun GCR agrivoltaico.")
+        ingreso_neto_vaca = r1c3.slider("Ingreso neto/vaca (COP/año)", 200_000, 2_000_000, _DEFAULT_INGRESO_NETO_VACA_COP, 50_000,
+                                         key="fin_s_ingreso_vaca",
+                                         help="Ingreso neto por animal por año, ya descontados costos veterinarios, alimentacion y jornales.")
         ha_por_mw       = r1c4.slider("Ha por MW solar", 1.5, 3.0, _HA_POR_MW, 0.01, key="fin_s_hamw")
 
         r2c1, r2c2, r2c3, r2c4 = st.columns(4)
@@ -1458,9 +1455,7 @@ def render_viabilidad_financiera_tab(df: pd.DataFrame, top5: pd.DataFrame) -> No
         salario_mensual = r2c3.slider("Salario mensual empleado (COP)", 1_300_000, 6_000_000, 2_600_000, 100_000,
                                        help="Incluye todas las prestaciones (factor x1.52 aplicado automaticamente).",
                                        key="fin_s_salario")
-        costo_ganadero_pct = r2c4.slider("Costo operativo ganadero (% ingreso carne)", 20, 60, 35, 5,
-                                          help="Veterinaria, suplementacion mineral, jornales ganaderos.",
-                                          key="fin_s_cgano")
+        _ = r2c4.empty()   # espacio reservado (costo ganadero ya incluido en ingreso neto/vaca)
 
         r3c1, r3c2, r3c3, r3c4 = st.columns(4)
         om_per_mw       = r3c1.slider("Empleados O&M directos / MW", 0.05, 0.5, 0.142, 0.001,
@@ -1482,27 +1477,29 @@ def render_viabilidad_financiera_tab(df: pd.DataFrame, top5: pd.DataFrame) -> No
         )
         st.caption(
             f"Equivalente del slider de paneles: **{ha_paneles_max:,} ha = ~{ha_paneles_max/ha_por_mw:,.1f} MW**  ·  "
-            f"Bovinos esperados bajo paneles: **{ha_paneles_max * ugg_agro:,.0f}** "
-            f"({ha_paneles_max:,} ha x {ugg_agro} UGG/ha). "
+            f"Vacas esperadas bajo paneles: **{ha_paneles_max * vacas_ha:,.0f}** "
+            f"({ha_paneles_max:,} ha × {vacas_ha:.0f} vacas/ha · ingreso neto {ingreso_neto_vaca:,.0f} COP/vaca = "
+            f"{ha_paneles_max * vacas_ha * ingreso_neto_vaca / 1e6:,.1f} M COP/año ganadero). "
             f"Si el municipio tiene menos area viable, se usa el tope del municipio."
         )
 
     params = dict(
-        precio_energia=precio_energia, precio_carne=precio_carne,
-        ugg_agro=ugg_agro, ha_por_mw=ha_por_mw, vida_util=vida_util,
+        precio_energia=precio_energia,
+        vacas_ha=vacas_ha, ingreso_neto_vaca_cop=ingreso_neto_vaca,
+        ha_por_mw=ha_por_mw, vida_util=vida_util,
         oym_pct=oym_pct, salario_mensual=salario_mensual,
-        costo_ganadero_pct=costo_ganadero_pct,
         om_per_mw=om_per_mw, om_total_per_mw=om_total_per_mw,
         tarifa_agua_default=tarifa_agua_default,
         ha_paneles_max=ha_paneles_max,
     )
 
     # Calcular agrivoltaico base para obtener ha_viable por municipio
+    # (usa parametros de Beneficio tab — solo necesitamos ha_viable de aqui)
     agro_base = _calcular_agrovoltaico(df, {
         "precio_energia_cop_kwh": precio_energia,
-        "precio_carne_cop_kg": precio_carne,
-        "ugg_agro": ugg_agro,
-        "ugg_tradicional": 1.5,
+        "precio_carne_cop_kg": _DEFAULT_PRECIO_CARNE,
+        "ugg_agro": _DEFAULT_UGG_AGRO,
+        "ugg_tradicional": _DEFAULT_UGG_TRAD,
         "ha_por_mw": ha_por_mw,
         "tarifa_agua_default": tarifa_agua_default,
     })
@@ -1559,7 +1556,6 @@ def render_viabilidad_financiera_tab(df: pd.DataFrame, top5: pd.DataFrame) -> No
             ("- Costo agua",        -f["c_agua"]         / ha_div, "relative"),
             ("- O&M solar",         -f["c_oym_solar"]    / ha_div, "relative"),
             ("- Empleados",         -f["c_empleados"]    / ha_div, "relative"),
-            ("- Costo ganadero",    -f["c_ganadero"]     / ha_div, "relative"),
             ("EBITDA",               f["ebitda"]         / ha_div, "total"),
             ("- Amort. paneles",    -f["amort_paneles"]  / ha_div, "relative"),
             ("- Amort. BOS",        -f["amort_bos"]      / ha_div, "relative"),
@@ -1665,7 +1661,7 @@ def render_viabilidad_financiera_tab(df: pd.DataFrame, top5: pd.DataFrame) -> No
 | **Amortizacion total/año** | **`{f['amort_anual']:,.1f} M COP/año`** |
 | — | — |
 | Ingreso solar (con deg. {(1-f['factor_degradacion'])*100:.1f}%) | `{f['i_solar']:,.1f} M COP/año` |
-| Ingreso ganadero | `{f['i_ganado']:,.1f} M COP/año` |
+| Ingreso ganadero ({params['vacas_ha']:.0f} vacas/ha × {params['ingreso_neto_vaca_cop']:,.0f} COP neto) | `{f['i_ganado']:,.1f} M COP/año` |
 | **Ingreso bruto** | **`{f['i_total']:,.1f} M COP/año`** |
 | Total costos oper. | `{f['c_operativos']:,.1f} M COP/año` |
 | **EBITDA** | **`{f['ebitda']:,.1f} M COP/año`** |
@@ -1703,10 +1699,10 @@ def render_viabilidad_financiera_tab(df: pd.DataFrame, top5: pd.DataFrame) -> No
 
         st.markdown("**Desglose de costos operativos**")
         fig_pie = go.Figure(go.Pie(
-            labels=["Agua lavado", "O&M solar", "Empleados", "Operativo ganadero"],
-            values=[f["c_agua"], f["c_oym_solar"], f["c_empleados"], f["c_ganadero"]],
+            labels=["Agua lavado", "O&M solar", "Empleados"],
+            values=[f["c_agua"], f["c_oym_solar"], f["c_empleados"]],
             hole=0.4,
-            marker_colors=["#2563EB", "#16A34A", "#D97706", "#DC2626"],
+            marker_colors=["#2563EB", "#16A34A", "#D97706"],
             textfont=dict(size=13, color="#111827"),
         ))
         fig_pie.update_layout(
