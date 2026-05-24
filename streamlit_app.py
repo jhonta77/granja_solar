@@ -102,18 +102,16 @@ ECONOMICO_VARS = {
     "score_economico":           (">>> SCORE ECONOMICO (peso 20%)", "Calculado"),
 }
 AGRO_VARS = {
-    "ugg_ha_proxy":              ("UGG por hectarea proxy", "EVA-ICA"),
-    "sistema_productivo":        ("Sistema productivo", "EVA-ICA"),
+    "carga_bovina_proxy_cabezas_ha_municipio": ("Carga bovina real (cab/ha municipio)", "DANE / ICA"),
+    "inventario_bovinos":        ("Inventario bovino total (cabezas)", "ICA"),
     "pct_area_protegida_runap":  ("% area protegida RUNAP", "RUNAP"),
     "u_i_no_protegido_runap":    ("Fraccion no protegida (0-1)", "RUNAP"),
     "score_agropecuario":        (">>> SCORE AGROPECUARIO (peso 15%)", "Calculado"),
 }
 RIESGO_VARS = {
-    "riesgo_inundacion_idx":     ("Indice riesgo inundacion (0-1)", "IMRC DNP"),
-    "riesgo_sequia_idx":         ("Indice riesgo sequia (0-1)", "IMRC DNP"),
-    "score_riesgo_viento_modelo":("Score riesgo viento (0-1)", "NASA / imputado"),
+    "score_riesgo_viento_modelo":     ("Score riesgo viento (0-1)", "NASA Power / imputado"),
     "imputacion_score_riesgo_viento": ("Metodo imputacion viento", "Pipeline"),
-    "score_riesgo":              (">>> SCORE RIESGO (peso 10%)", "Calculado"),
+    "score_riesgo":                   (">>> SCORE RIESGO (peso 10%)", "Calculado"),
 }
 TOTAL_VARS = {
     "score_fisico":       ("Score Fisico",       "x 0.30"),
@@ -799,12 +797,12 @@ def render_ranking_tab(df: pd.DataFrame, top5: pd.DataFrame, numero1: pd.Series)
         st.caption("Costo de la tierra y del agua como proxy de la viabilidad economica de la inversion.")
         st.dataframe(style_table(build_table(numero1, ECONOMICO_VARS)), use_container_width=True, hide_index=True)
         st.markdown("#### Score Agropecuario `(peso: 15%)`")
-        st.caption("Carga ganadera (UGG/ha) y uso del suelo como indicador del costo de oportunidad agrivoltaico.")
+        st.caption("Carga bovina real (cab/ha municipio) e inventario total como indicador del costo de oportunidad agrivoltaico. Fuente: ICA / DANE.")
         st.dataframe(style_table(build_table(numero1, AGRO_VARS)), use_container_width=True, hide_index=True)
 
     with tab3:
         st.markdown("#### Score Riesgo `(peso: 10%)`")
-        st.caption("Indices de riesgo de inundacion y sequia (IMRC DNP) y riesgo de viento.")
+        st.caption("Score de riesgo de viento (NASA Power) — unico componente de riesgo climatico disponible a nivel municipal. Los indices DNP de inundacion/sequia no tienen cobertura municipal completa.")
         st.dataframe(style_table(build_table(numero1, RIESGO_VARS)), use_container_width=True, hide_index=True)
         st.markdown("#### Composicion del Score Total")
         st.caption("Suma ponderada de las 5 dimensiones que produce el score multidimensional final.")
@@ -979,7 +977,6 @@ def render_raw_tab(df: pd.DataFrame, top5: pd.DataFrame, df_rent: pd.DataFrame |
 _HA_POR_MW        = 3.197   # NREL: 7.9 acres/MW AREA TOTAL (incluye vias, retiros, espaciado entre filas)
                             # Equivale a 312.8 kW/ha — misma base del Comparativo y CSV Rentabilidad
                             # NO usar 5 acres/MW (area directa bajo paneles) para proyectos reales
-_KG_CARNE_UGG_AÑO = 250.0  # kg carne viva por UGG por año (conservador)
 _AGUA_M3_POR_MWH  = 0.098  # NREL: litros de lavado (m³/MWh)
 
 # Defaults economicos compartidos entre TODAS las pestañas
@@ -990,29 +987,36 @@ _DEFAULT_UGG_AGRO       = 4.0       # UGG/ha bajo paneles (solo para tab Benefic
 _DEFAULT_UGG_TRAD       = 1.5       # UGG/ha sistema tradicional sin sombra (tropico bajo)
 _DEFAULT_TARIFA_AGUA    = 1_800     # COP/m³ default (mediana SUI)
 
-# ── Modelo ganadero UNIFICADO: mismo en Financiera y Comparativo ──────────────
-_DEFAULT_VACAS_HA              = 6.0         # cabezas/ha bajo paneles agrivoltaicos
+# ── Modelo ganadero UNIFICADO: mismo en Financiera, Comparativo y Agrivoltaico ─
+_DEFAULT_VACAS_HA              = 6.0         # cabezas/ha bajo paneles (sombra mejora capacidad de carga)
 _DEFAULT_INGRESO_NETO_VACA_COP = 600_000     # COP/vaca/año NETO (despues de alimentacion, veterinario, sal mineral)
-# Resultado: 6 × 600,000 = 3,600,000 COP/ha/año = 3.6 M COP/ha/año
+# Resultado agrivoltaico: 6 × 600,000 = 3,600,000 COP/ha/año = 3.6 M COP/ha/año
+
+# Baseline ganadero tradicional (extensivo, sin sombra de paneles)
+_DEFAULT_VACAS_TRAD_HA           = 3.0       # cab/ha ganaderia extensiva tropico bajo Colombia (menor densidad sin sombra)
+_DEFAULT_INGRESO_NETO_TRAD_COP   = 350_000   # COP/vaca/año NETO ganaderia extensiva (mas costos, menos productividad)
+# Resultado tradicional: 3 × 350,000 = 1,050,000 COP/ha/año = 1.05 M COP/ha/año
 
 
 def _calcular_agrovoltaico(df: pd.DataFrame, params: dict) -> pd.DataFrame:
     """
     Calcula el beneficio agrivoltaico por municipio.
 
-    Modelo:
+    Modelo bovino UNIFICADO (mismo que pestanas Financiera y Comparativo):
       ha_viable = area_no_protegida_km2 * 100 * score_pendiente
       MW_solar  = ha_viable / ha_por_mw
-      MWh_año   = MW_solar * pvout * 365 * 1000 / 1000
-      ingreso_solar (M COP) = MWh * precio_energia / 1e6
+      MWh_año   = MW_solar * pvout * 365
 
-      bovinos_agrivoltaico = ha_viable * ugg_agro
-      bovinos_puro         = ha_viable * ugg_tradicional
-      ingreso_carne_agro (M COP) = bovinos_agrivoltaico * kg_ugg * precio_carne / 1e6
-      ingreso_carne_puro (M COP) = bovinos_puro * kg_ugg * precio_carne / 1e6
+      Agrivoltaico:
+        bovinos_agro = ha_viable * vacas_ha        (6 vacas/ha — sombra mejora capacidad de carga)
+        ingreso_carne_agro = bovinos_agro * ingreso_neto_vaca_cop / 1e6   (ya es NETO)
 
-      ingreso_total_agro = ingreso_solar + ingreso_carne_agro
-      ganancia_vs_puro_solar    = ingreso_total_agro - ingreso_solar
+      Ganaderia tradicional (baseline extensivo):
+        bovinos_puro = ha_viable * vacas_trad_ha   (3 vacas/ha — sin beneficio de sombra)
+        ingreso_carne_puro = bovinos_puro * ingreso_neto_vaca_trad_cop / 1e6
+
+      ingreso_total_agro = ingreso_solar + ingreso_carne_agro - costo_agua
+      ganancia_vs_puro_solar    = ingreso_total_agro - ingreso_puro_solar
       ganancia_vs_puro_ganadero = ingreso_total_agro - ingreso_carne_puro
     """
     out = df[["codigo_dane", "municipio", "departamento", "lat", "lon",
@@ -1049,17 +1053,17 @@ def _calcular_agrovoltaico(df: pd.DataFrame, params: dict) -> pd.DataFrame:
     out["costo_agua_m_cop"]   = (out["agua_lavado_m3_año"] *
                                   out["tarifa_acueducto_m3_cop"].fillna(params["tarifa_agua_default"]) / 1e6).round(3)
 
-    # Bovinos agrivoltaico
-    out["bovinos_agro"]          = (out["ha_viable"] * params["ugg_agro"]).round(0)
-    out["ingreso_carne_agro_m_cop"] = (
-        out["bovinos_agro"] * _KG_CARNE_UGG_AÑO * params["precio_carne_cop_kg"] / 1e6
-    ).round(2)
+    # Bovinos agrivoltaico — modelo unificado: vacas/ha × ingreso neto/vaca
+    vacas_ha_agro = params.get("vacas_ha", _DEFAULT_VACAS_HA)
+    ingreso_vaca  = params.get("ingreso_neto_vaca_cop", _DEFAULT_INGRESO_NETO_VACA_COP)
+    out["bovinos_agro"]             = (out["ha_viable"] * vacas_ha_agro).round(0)
+    out["ingreso_carne_agro_m_cop"] = (out["bovinos_agro"] * ingreso_vaca / 1e6).round(2)
 
-    # Bovinos puro ganadero (baseline)
-    out["bovinos_puro"]          = (out["ha_viable"] * params["ugg_tradicional"]).round(0)
-    out["ingreso_carne_puro_m_cop"] = (
-        out["bovinos_puro"] * _KG_CARNE_UGG_AÑO * params["precio_carne_cop_kg"] / 1e6
-    ).round(2)
+    # Bovinos puro ganadero (baseline extensivo tradicional)
+    vacas_trad_ha  = params.get("vacas_trad_ha", _DEFAULT_VACAS_TRAD_HA)
+    ingreso_vaca_t = params.get("ingreso_neto_vaca_trad_cop", _DEFAULT_INGRESO_NETO_TRAD_COP)
+    out["bovinos_puro"]             = (out["ha_viable"] * vacas_trad_ha).round(0)
+    out["ingreso_carne_puro_m_cop"] = (out["bovinos_puro"] * ingreso_vaca_t / 1e6).round(2)
 
     # Totales
     out["ingreso_total_agro_m_cop"] = (
@@ -1094,20 +1098,22 @@ def render_agrivoltaico_tab(df: pd.DataFrame, top5: pd.DataFrame) -> None:
         "en las mismas hectareas viables. Compara contra solo ganaderia tradicional o solo solar."
     )
 
-    # Parametros fijos del modelo (UNIFICADOS con tab Viabilidad Financiera)
+    # Parametros fijos del modelo (UNIFICADOS con pestanas Financiera y Comparativo)
     params = {
-        "precio_energia_cop_kwh": _DEFAULT_PRECIO_ENERGIA,
-        "precio_carne_cop_kg":    _DEFAULT_PRECIO_CARNE,
-        "ugg_agro":               _DEFAULT_UGG_AGRO,
-        "ugg_tradicional":        _DEFAULT_UGG_TRAD,
-        "ha_por_mw":              _HA_POR_MW,
-        "tarifa_agua_default":    _DEFAULT_TARIFA_AGUA,
+        "precio_energia_cop_kwh":     _DEFAULT_PRECIO_ENERGIA,
+        "vacas_ha":                   _DEFAULT_VACAS_HA,
+        "ingreso_neto_vaca_cop":      _DEFAULT_INGRESO_NETO_VACA_COP,
+        "vacas_trad_ha":              _DEFAULT_VACAS_TRAD_HA,
+        "ingreso_neto_vaca_trad_cop": _DEFAULT_INGRESO_NETO_TRAD_COP,
+        "ha_por_mw":                  _HA_POR_MW,
+        "tarifa_agua_default":        _DEFAULT_TARIFA_AGUA,
     }
-    # Alias locales para usar en f-strings de la calculadora
+    # Alias locales para f-strings de la calculadora
     precio_energia      = params["precio_energia_cop_kwh"]
-    precio_carne        = params["precio_carne_cop_kg"]
-    ugg_agro            = params["ugg_agro"]
-    ugg_tradicional     = params["ugg_tradicional"]
+    vacas_ha_agro       = params["vacas_ha"]
+    ingreso_vaca        = params["ingreso_neto_vaca_cop"]
+    vacas_trad_ha       = params["vacas_trad_ha"]
+    ingreso_vaca_trad   = params["ingreso_neto_vaca_trad_cop"]
     ha_por_mw           = params["ha_por_mw"]
     tarifa_agua_default = params["tarifa_agua_default"]
 
@@ -1137,9 +1143,10 @@ def render_agrivoltaico_tab(df: pd.DataFrame, top5: pd.DataFrame) -> None:
     )
 
     st.caption(
-        f"Parametros (mismos en todas las pestañas): {params['precio_energia_cop_kwh']} COP/kWh · {params['precio_carne_cop_kg']:,} COP/kg carne · "
-        f"{params['ugg_agro']} UGG/ha agrivoltaico · {params['ugg_tradicional']} UGG/ha tradicional · "
-        f"{params['ha_por_mw']} ha/MW · {_KG_CARNE_UGG_AÑO:.0f} kg/UGG/año · {_AGUA_M3_POR_MWH} m³/MWh. "
+        f"Parametros (mismos en todas las pestañas): {params['precio_energia_cop_kwh']} COP/kWh · "
+        f"{params['vacas_ha']:.0f} vacas/ha agrivoltaico · {params['ingreso_neto_vaca_cop']:,} COP/vaca/año neto · "
+        f"{params['vacas_trad_ha']:.0f} vacas/ha ganaderia tradicional · {params['ingreso_neto_vaca_trad_cop']:,} COP/vaca/año neto · "
+        f"{params['ha_por_mw']} ha/MW · {_AGUA_M3_POR_MWH} m³/MWh lavado. "
         "El ranking se ordena por **ingreso/ha × score multidimensional** — asi un municipio enorme pero sin red electrica no domina solo por area."
     )
 
@@ -1272,31 +1279,31 @@ def render_agrivoltaico_tab(df: pd.DataFrame, top5: pd.DataFrame) -> None:
         st.markdown(f"""
 | Concepto | Calculo | Resultado |
 |---|---|---|
-| Carga agrivoltaica | {ugg_agro} UGG/ha | — |
-| **Bovinos bajo paneles** | {ha:,.0f} ha × {ugg_agro} UGG/ha | **{bov_agro:,.0f} bovinos** |
-| Produccion por animal | {_KG_CARNE_UGG_AÑO:.0f} kg carne viva/UGG/año | — |
-| **Ingreso ganadero** | {bov_agro:,.0f} × {_KG_CARNE_UGG_AÑO:.0f} kg × {precio_carne:,} COP | **{i_carn:,.1f} M COP/año** |
+| Vacas/ha agrivoltaico | {vacas_ha_agro:.0f} cab/ha (sombra parcial 40-60% mejora pastizal) | — |
+| **Bovinos bajo paneles** | {ha:,.0f} ha × {vacas_ha_agro:.0f} vacas/ha | **{bov_agro:,.0f} bovinos** |
+| Ingreso neto/vaca | {ingreso_vaca:,} COP/vaca/año (ya descontado alimentacion + veterinario) | — |
+| **Ingreso ganadero neto** | {bov_agro:,.0f} vacas × {ingreso_vaca:,} COP | **{i_carn:,.1f} M COP/año** |
 """)
         st.caption(
-            f"Los paneles generan sombra parcial (40-60%). Segun AGROSAVIA, el pasto bajo sombra "
-            f"mantiene {ugg_agro} UGG/ha con suplementacion vs {ugg_tradicional} UGG/ha en pastoreo "
-            f"tradicional abierto."
+            f"Sombra parcial 40-60% de paneles → pastizal soporta {vacas_ha_agro:.0f} vacas/ha "
+            f"vs {vacas_trad_ha:.0f} vacas/ha en ganaderia extensiva tradicional sin sombra. "
+            f"Ingreso neto/vaca ya incluye costos de alimentacion, veterinario y sal mineral (AGROSAVIA/FEDEGAN)."
         )
 
         st.markdown("#### Paso 5 — Total agrivoltaico y comparacion")
         st.markdown(f"""
-| Estrategia | Calculo | Ingreso anual |
+| Estrategia | Calculo | Ingreso neto anual |
 |---|---|---|
-| Solo ganaderia ({ugg_tradicional} UGG/ha) | {bov_puro:,.0f} bovinos × {_KG_CARNE_UGG_AÑO:.0f} kg × {precio_carne:,} COP | **{i_gan_puro:,.1f} M COP** |
+| Solo ganaderia trad. ({vacas_trad_ha:.0f} vacas/ha × {ingreso_vaca_trad:,} COP/vaca) | {bov_puro:,.0f} vacas × {ingreso_vaca_trad:,} COP | **{i_gan_puro:,.1f} M COP** |
 | Solo solar | {i_sol:,.1f} M − {c_agua:.3f} M agua | **{i_sol_puro:,.1f} M COP** |
 | **Agrivoltaico** | {i_sol:,.1f} M solar + {i_carn:,.1f} M ganado − {c_agua:.3f} M agua | **{i_tot:,.1f} M COP** |
 """)
 
         col_a, col_b, col_c = st.columns(3)
         col_a.metric(
-            "Solo ganado",
+            "Solo ganado tradicional",
             f"{i_gan_puro:,.1f} M COP/año",
-            help=f"{bov_puro:,.0f} bovinos × {_KG_CARNE_UGG_AÑO:.0f} kg × {precio_carne:,} COP",
+            help=f"{bov_puro:,.0f} vacas × {ingreso_vaca_trad:,} COP/vaca neto ({vacas_trad_ha:.0f} vacas/ha extensivo)",
         )
         col_b.metric(
             "Solo solar",
@@ -1313,18 +1320,24 @@ def render_agrivoltaico_tab(df: pd.DataFrame, top5: pd.DataFrame) -> None:
         st.markdown("#### Por que funciona esta combinacion")
         razon_solar   = "buena irradiacion solar" if pvout_val >= 4.5 else "irradiacion solar moderada"
         razon_tierra  = f"precio de tierra {'bajo' if precio_tierra < 5_000_000 else 'moderado'} ({precio_tierra:,.0f} COP/ha)" if precio_tierra > 0 else "costo de tierra disponible"
-        razon_bovinos = f"alta densidad ganadera posible ({ugg_agro} UGG/ha) gracias a la sombra parcial de los paneles"
+        razon_bovinos = (
+            f"mayor densidad ganadera ({vacas_ha_agro:.0f} vacas/ha vs {vacas_trad_ha:.0f} trad.) "
+            f"gracias a la sombra parcial de los paneles"
+        )
         st.info(
             f"**{mun_sel}** combina: **{razon_solar}** (PVOUT {pvout_val:.2f} kWh/kWp/dia), "
             f"**{razon_tierra}**, y **{razon_bovinos}**. "
             f"El agrivoltaico permite generar {mwh:,.0f} MWh de electricidad al año y mantener "
-            f"{bov_agro:,.0f} bovinos simultaneamente en las mismas {ha:,.0f} ha — algo imposible "
-            f"en un modelo de uso exclusivo de suelo."
+            f"{bov_agro:,.0f} bovinos simultaneamente en las mismas {ha:,.0f} ha, "
+            f"generando {i_carn:,.1f} M COP/año de ingreso ganadero neto adicional."
         )
 
     st.caption(
-        f"**Supuestos:** {_KG_CARNE_UGG_AÑO:.0f} kg carne viva/UGG/año · "
-        f"{_AGUA_M3_POR_MWH} m³ agua/MWh (NREL) · {ha_por_mw} ha/MW (NREL) · "
+        f"**Supuestos bovinos:** Agrivoltaico {params['vacas_ha']:.0f} vacas/ha · "
+        f"{params['ingreso_neto_vaca_cop']:,} COP/vaca/año neto (costos ya incluidos) · "
+        f"Tradicional {params['vacas_trad_ha']:.0f} vacas/ha · "
+        f"{params['ingreso_neto_vaca_trad_cop']:,} COP/vaca/año neto.  "
+        f"**Supuestos solar:** {_AGUA_M3_POR_MWH} m³/MWh lavado (NREL) · {ha_por_mw} ha/MW (NREL).  "
         "Ha viable = area no protegida RUNAP × score_pendiente. "
         "Fuentes: NREL, AGROSAVIA, FEDEGAN, UPME, UPRA, SUI."
     )
@@ -1608,14 +1621,15 @@ def render_viabilidad_financiera_tab(df: pd.DataFrame, top5: pd.DataFrame) -> No
     )
 
     # Calcular agrivoltaico base para obtener ha_viable por municipio
-    # (usa parametros de Beneficio tab — solo necesitamos ha_viable de aqui)
+    # (modelo bovino unificado — solo necesitamos ha_viable aqui)
     agro_base = _calcular_agrovoltaico(df, {
-        "precio_energia_cop_kwh": precio_energia,
-        "precio_carne_cop_kg": _DEFAULT_PRECIO_CARNE,
-        "ugg_agro": _DEFAULT_UGG_AGRO,
-        "ugg_tradicional": _DEFAULT_UGG_TRAD,
-        "ha_por_mw": ha_por_mw,
-        "tarifa_agua_default": tarifa_agua_default,
+        "precio_energia_cop_kwh":     precio_energia,
+        "vacas_ha":                   _DEFAULT_VACAS_HA,
+        "ingreso_neto_vaca_cop":      _DEFAULT_INGRESO_NETO_VACA_COP,
+        "vacas_trad_ha":              _DEFAULT_VACAS_TRAD_HA,
+        "ingreso_neto_vaca_trad_cop": _DEFAULT_INGRESO_NETO_TRAD_COP,
+        "ha_por_mw":                  ha_por_mw,
+        "tarifa_agua_default":        tarifa_agua_default,
     })
     # Dedupe por municipio (puede haber nombres repetidos en distintos departamentos)
     agro_base = agro_base.drop_duplicates(subset=["municipio"]).set_index("municipio")
