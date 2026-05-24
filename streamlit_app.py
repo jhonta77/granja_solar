@@ -2423,7 +2423,7 @@ def _chart_vpn_vs_ppa(
     return fig
 
 
-def render_comparativo_tab() -> None:
+def render_comparativo_tab(df: pd.DataFrame) -> None:
     """Comparativo financiero: Agrivoltaico (NREL/IRENA) vs Solar Denso (parametros Gemini)."""
     import plotly.graph_objects as go
 
@@ -2440,6 +2440,47 @@ def render_comparativo_tab() -> None:
         "sin uso agropecuario. Mayor potencia instalada, CAPEX ~4× mas alto, solo ingreso solar."
     )
 
+    # ── Selector de municipio — carga PVOUT real automaticamente ─────────────
+    st.markdown("### Municipio de referencia")
+    all_muns_c = sorted(df["municipio"].dropna().astype(str).unique().tolist())
+
+    def _on_mun_comp_change() -> None:
+        mun = st.session_state.get("comp_mun_sel", "")
+        matches = df[df["municipio"] == mun]
+        if matches.empty:
+            return
+        row_m = matches.iloc[0]
+        pvout_dia = float(pd.to_numeric(row_m.get("pvout_kwh_kwp_day", 0), errors="coerce") or 0)
+        if pvout_dia > 0:
+            pvout_anual = round(pvout_dia * 365, 0)
+            st.session_state["yield_a"] = pvout_anual           # rendimiento real para A
+            st.session_state["yield_b"] = round(pvout_anual * 0.96, 0)  # -4% por GCR alto en B
+
+    mun_sel_c = st.selectbox(
+        "Selecciona el municipio para usar su PVOUT real",
+        all_muns_c,
+        index=0,
+        key="comp_mun_sel",
+        on_change=_on_mun_comp_change,
+        help="Al cambiar el municipio, el rendimiento solar (kWh/kWp/año) se actualiza automaticamente con el PVOUT real de Solargis para esa ubicacion.",
+    )
+
+    # Leer PVOUT real del municipio seleccionado para mostrar en el badge
+    row_comp_mun = df[df["municipio"] == mun_sel_c]
+    pvout_mun_dia = 0.0
+    if not row_comp_mun.empty:
+        pvout_mun_dia = float(pd.to_numeric(row_comp_mun.iloc[0].get("pvout_kwh_kwp_day", 0), errors="coerce") or 0)
+
+    if pvout_mun_dia > 0:
+        pvout_mun_anual = pvout_mun_dia * 365
+        st.success(
+            f"📡 **{mun_sel_c}** — PVOUT Solargis: **{pvout_mun_dia:.3f} kWh/kWp/día**  →  "
+            f"**{pvout_mun_anual:,.0f} kWh/kWp/año** (rendimiento real — cargado en los campos de abajo)"
+        )
+    else:
+        pvout_mun_anual = 1_478.0
+        st.info(f"ℹ️ {mun_sel_c}: sin dato PVOUT disponible — usando promedio Colombia 1,478 kWh/kWp/año.")
+
     st.divider()
 
     # ── Banner de congruencia ─────────────────────────────────────────────────
@@ -2448,7 +2489,7 @@ def render_comparativo_tab() -> None:
         f"**Supuestos unificados (NREL / IRENA 2025 / AGROSAVIA):**  \n"
         f"📐 **Densidad:** {1/_HA_POR_MW*1000:.1f} kW/ha ({_HA_POR_MW} ha/MW — area TOTAL incluyendo vias, retiros y espaciado entre filas)  ·  "
         f"💰 **CAPEX:** USD 700/kW agrivoltaico ({_BOS_M_COP_POR_MW:,.0f} M COP/MW BOS + paneles)  ·  "
-        f"⚡ **Rendimiento:** 1,478 kWh/kWp/año (PVOUT Colombia — World Bank)  ·  "
+        f"⚡ **Rendimiento:** {pvout_mun_anual:,.0f} kWh/kWp/año ({'PVOUT real ' + mun_sel_c if pvout_mun_dia > 0 else 'PVOUT promedio Colombia'} — Solargis)  ·  "
         f"🐄 **Ganado:** {_DEFAULT_UGG_AGRO} UGG/ha ≈ 6 vacas/ha bajo paneles (ingreso ganadero neto ~3.6 M COP/ha/año)  ·  "
         f"📊 **PPA base:** {_DEFAULT_PRECIO_ENERGIA} COP/kWh  ·  "
         f"📉 **Degradacion:** 0.5%/año  ·  "
@@ -2527,8 +2568,10 @@ def render_comparativo_tab() -> None:
         capex_usd_a = st.number_input("CAPEX (USD/kW)", 300.0, 1_200.0, 700.0, 10.0,
                                        key="capex_a",
                                        help="Base IRENA 2025: $599/kW estructura plana + ~17% por estructura elevada (2-4 m) que requiere el agrivoltaico para que el ganado circule = $700/kW.")
-        yield_kwh_a = st.number_input("Rendimiento (kWh/kWp/año)", 800.0, 2_500.0, 1_478.0, 10.0,
-                                       key="yield_a", help="PVOUT promedio Colombia — World Bank/ESMAP.")
+        _yield_a_default = float(st.session_state.get("yield_a", pvout_mun_anual))
+        yield_kwh_a = st.number_input("Rendimiento (kWh/kWp/año)", 800.0, 2_500.0, _yield_a_default, 10.0,
+                                       key="yield_a",
+                                       help="PVOUT real del municipio seleccionado (Solargis). Se actualiza automaticamente al cambiar el municipio arriba.")
         ganado_m    = st.number_input("Ingreso ganadero (M COP/ha/año)", 0.0, 30.0, 3.6, 0.1,
                                        key="ganado_a",
                                        help="6 vacas/ha × 600,000 COP/vaca/año de rentabilidad neta = 3,600,000 COP/ha/año. La sombra de los paneles mejora el pasto en clima caliente, permitiendo mayor carga animal. Solo Escenario A.")
@@ -2548,9 +2591,10 @@ def render_comparativo_tab() -> None:
         capex_usd_b = st.number_input("CAPEX (USD/kW)", 300.0, 1_500.0, 599.0, 10.0,
                                        key="capex_b",
                                        help="IRENA 2025 proyeccion Colombia: $599/kW para instalacion ground-mount estandar. Misma fuente que A; el costo por kW es igual — la diferencia de CAPEX/ha viene de instalar mas kW/ha.")
-        yield_kwh_b = st.number_input("Rendimiento (kWh/kWp/año)", 800.0, 2_500.0, 1_420.0, 10.0,
+        _yield_b_default = float(st.session_state.get("yield_b", pvout_mun_anual * 0.96))
+        yield_kwh_b = st.number_input("Rendimiento (kWh/kWp/año)", 800.0, 2_500.0, _yield_b_default, 10.0,
                                        key="yield_b",
-                                       help="Ligeramente menor que A por mayor GCR (~0.60): sombras entre filas reducen ~3-4% el rendimiento por panel.")
+                                       help="PVOUT real del municipio −4% por mayor GCR (~0.60): paneles mas juntos generan sombras entre filas. Se actualiza al cambiar municipio.")
         opex_pct_b  = st.number_input("OPEX solar (% CAPEX/año)", 0.5, 5.0, 1.5, 0.1,
                                        key="opex_b") / 100
         mant_m      = st.number_input("Mantenimiento suelo (M COP/ha/año)", 0.0, 5.0, 1.0, 0.5,
@@ -2600,11 +2644,17 @@ def render_comparativo_tab() -> None:
     def _fmt_pb(p) -> str:
         return f"Año {p}" if p else "❌ No recupera"
 
+    pvout_label_a = (f"{pvout_mun_dia:.3f} kWh/kWp/día → {yield_kwh_a:,.0f} kWh/kWp/año (real {mun_sel_c})"
+                     if pvout_mun_dia > 0 else f"Promedio Colombia → {yield_kwh_a:,.0f} kWh/kWp/año")
+    pvout_label_b = (f"{pvout_mun_dia:.3f} kWh/kWp/día → {yield_kwh_b:,.0f} kWh/kWp/año (real −4% GCR)"
+                     if pvout_mun_dia > 0 else f"Promedio Colombia → {yield_kwh_b:,.0f} kWh/kWp/año")
+
     kpi_rows = [
-        ("CAPEX total",           _fmt_m(capex_cop_a),                       _fmt_m(capex_cop_b)),
-        ("CAPEX (USD/ha)",        f"USD {kw_ha_a * capex_usd_a:,.0f}",       f"USD {kw_ha_b * capex_usd_b:,.0f}"),
-        ("Potencia instalada",    f"{kw_ha_a:.1f} kW/ha",                    f"{kw_ha_b:.1f} kW/ha"),
-        ("Generacion año 1",      f"{kw_ha_a * yield_kwh_a / 1e3:,.0f} MWh/ha", f"{kw_ha_b * yield_kwh_b / 1e3:,.0f} MWh/ha"),
+        ("CAPEX total",              _fmt_m(capex_cop_a),                          _fmt_m(capex_cop_b)),
+        ("CAPEX (USD/ha)",           f"USD {kw_ha_a * capex_usd_a:,.0f}",          f"USD {kw_ha_b * capex_usd_b:,.0f}"),
+        ("Potencia instalada",       f"{kw_ha_a:.1f} kW/ha",                       f"{kw_ha_b:.1f} kW/ha"),
+        ("PVOUT real del municipio", pvout_label_a,                                 pvout_label_b),
+        ("Generacion año 1",         f"{kw_ha_a * yield_kwh_a / 1e3:,.0f} MWh/ha", f"{kw_ha_b * yield_kwh_b / 1e3:,.0f} MWh/ha"),
         ("Ingreso solar año 1",   _fmt_m(solar_yr1_a),                       _fmt_m(solar_yr1_b)),
         ("Ingreso ganado año 1",  _fmt_m(ganado_cop_a),                      "— (sin ganado)"),
         ("OPEX total año 1",      _fmt_m(opex_a),                            _fmt_m(opex_b)),
@@ -3524,7 +3574,7 @@ def main() -> None:
             )
 
     with tab_comp:
-        render_comparativo_tab()
+        render_comparativo_tab(df)
 
     with tab_glosario:
         render_glosario_tab()
