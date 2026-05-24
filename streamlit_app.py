@@ -2428,9 +2428,9 @@ def render_comparativo_tab() -> None:
                                        key="capex_a", help="IRENA 2025 proyeccion Colombia.")
         yield_kwh_a = st.number_input("Rendimiento (kWh/kWp/año)", 800.0, 2_500.0, 1_478.0, 10.0,
                                        key="yield_a", help="PVOUT promedio Colombia — World Bank/ESMAP.")
-        ganado_m    = st.number_input("Ingreso ganadero (M COP/ha/año)", 0.0, 30.0, 8.5, 0.5,
+        ganado_m    = st.number_input("Ingreso ganadero (M COP/ha/año)", 0.0, 30.0, 1.2, 0.1,
                                        key="ganado_a",
-                                       help="0.8 UA/ha × precio novillo. Solo Escenario A.")
+                                       help="4 vacas/ha × 300,000 COP/vaca/año de rentabilidad neta (descontando alimentacion, veterinario, sal mineral). Solo Escenario A.")
         opex_pct_a  = st.number_input("OPEX solar (% CAPEX/año)", 0.5, 5.0, 1.5, 0.1,
                                        key="opex_a") / 100
         opex_agro_m = st.number_input("OPEX ganadero (M COP/ha/año)", 0.0, 10.0, 3.0, 0.5,
