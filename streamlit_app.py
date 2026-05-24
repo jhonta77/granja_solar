@@ -3155,6 +3155,58 @@ _GLOSARIO: dict[str, list[tuple[str, str, str]]] = {
          "En este modelo se usa el inventario bovino para calcular la carga ganadera "
          "(UGG/ha) como proxy de la oportunidad agrivoltaica."),
     ],
+    "Agrivoltaico y ganaderia": [
+        ("Agrivoltaico",
+         "Sistema dual: paneles solares + uso agropecuario del mismo terreno",
+         "Modelo de negocio en el que el mismo terreno produce energia solar Y mantiene "
+         "una actividad agropecuaria (ganaderia, cultivos) de forma simultanea. Los paneles "
+         "se elevan 2-4 m del suelo y se espacian mas que en un parque denso para que el ganado "
+         "circule libremente y entre luz suficiente al pasto. Ventaja financiera clave: el CAPEX "
+         "es ~4x menor que el solar denso (312 kW/ha vs 950 kW/ha) porque se instalan menos "
+         "paneles, lo que reduce el PPA de equilibrio de ~237 a ~168 COP/kWh."),
+        ("Solar Denso",
+         "Parque solar tradicional optimizado para maxima densidad de paneles",
+         "Instalacion ground-mount clasica que maximiza paneles por hectarea (~950 kWp/ha). "
+         "Las filas van separadas solo lo suficiente para evitar sombras entre paneles "
+         "(7.5 m de paso tipico). No permite uso agropecuario bajo los paneles. "
+         "CAPEX ~3,040 M COP/ha (vs 749 M del agrivoltaico), por lo que necesita un PPA "
+         "mas alto para ser rentable (~237 COP/kWh vs ~168 COP/kWh)."),
+        ("Carga animal",
+         "Numero de cabezas de ganado por unidad de superficie",
+         "En ganaderia se expresa en cabezas/ha o en UA/ha. Indica cuantos animales puede "
+         "sostener el pasto de una hectarea sin degradarlo. En praderas abiertas de Colombia: "
+         "0.5-2.0 UA/ha segun el tipo de pasto y clima. Bajo paneles agrivoltaicos la sombra "
+         "puede MEJORAR la produccion de pasto en zonas calidas, permitiendo 4-6 cabezas/ha."),
+        ("UA / UGG",
+         "Unidad Animal / Unidad Gran Ganado — estandar de equivalencia bovina",
+         "1 UA = 1 bovino adulto de 450 kg. Permite comparar animales de distintos tamaños: "
+         "1 novillo joven = 0.7 UA, 1 vaca de cria = 1.0 UA, 1 toro = 1.25 UA. "
+         "El modelo EVA-ICA reporta el inventario en UGG/ha por municipio. "
+         "Para este proyecto se usa 6 vacas/ha (≈ 6 UA/ha), que es viable con pastos mejorados "
+         "bajo paneles en clima calido."),
+        ("GCR",
+         "Ground Coverage Ratio — Relacion de cobertura del suelo",
+         "Fraccion de la superficie del terreno cubierta fisicamente por los paneles. "
+         "GCR = ancho del panel / paso entre filas. "
+         "Solar denso: GCR ≈ 0.60 (paneles juntos, mayor generacion, sin espacio para ganado). "
+         "Agrivoltaico: GCR ≈ 0.25-0.35 (paneles separados, menos kW/ha, permite uso ganadero). "
+         "Un GCR alto tambien aumenta las sombras entre filas (inter-row shading) reduciendo "
+         "el rendimiento real por kWp instalado (~3-5% de perdida adicional)."),
+        ("Rentabilidad neta por animal",
+         "Utilidad real por cabeza por año despues de descontar todos los costos ganaderos",
+         "= Precio de venta del animal - (alimentacion + veterinario + sal mineral + mano de obra). "
+         "En Colombia: cria extensiva tradicional 200,000-400,000 COP/animal/año; "
+         "semi-intensiva con pastos mejorados 500,000-800,000 COP/animal/año. "
+         "En el modelo se usa 600,000 COP/animal/año × 6 animales/ha = 3.6 M COP/ha/año. "
+         "No confundir con el precio de venta bruto del novillo (~1.5-2.5 M COP/cabeza)."),
+        ("Ingreso ganadero",
+         "Flujo de caja anual proveniente de la actividad pecuaria bajo los paneles",
+         "= Carga animal (cabezas/ha) × Rentabilidad neta (COP/cabeza/año). "
+         "Es el ingreso EXTRA que diferencia el modelo agrivoltaico del solar puro. "
+         "Con 6 vacas/ha × 600,000 COP = 3.6 M COP/ha/año. Aunque parezca poco frente al "
+         "ingreso solar (~74 M COP/ha/año con PPA=160), reduce el PPA de equilibrio en ~7 COP/kWh "
+         "y mejora el flujo de caja en los primeros años cuando el proyecto aun no paga CAPEX."),
+    ],
     "Unidades de medida": [
         ("COP",
          "Peso colombiano — moneda local",
@@ -3204,32 +3256,75 @@ _GLOSARIO: dict[str, list[tuple[str, str, str]]] = {
 
 
 def render_glosario_tab() -> None:
+    _ICONOS = {
+        "Financiero y economico":       "💵",
+        "Tecnico solar y energia":      "⚡",
+        "Agrivoltaico y ganaderia":     "🐄",
+        "Scores y modelo matematico":   "📐",
+        "Entidades y fuentes de datos": "🏛️",
+        "Unidades de medida":           "📏",
+    }
+
     st.subheader("Glosario — terminos, siglas y abreviaturas del modelo")
-    st.caption(
-        "Referencia completa de todos los conceptos usados en el dashboard. "
-        "Haz clic en cada categoria para expandirla."
+
+    # ── Buscador ──────────────────────────────────────────────────────────────
+    busqueda = st.text_input(
+        "🔍 Buscar termino",
+        placeholder="Escribe CAPEX, PPA, TIR, GCR, agrivoltaico...",
+        key="glosario_busqueda",
     )
 
-    for categoria, terminos in _GLOSARIO.items():
-        icono = {
-            "Financiero y economico":       "💵",
-            "Tecnico solar y energia":      "⚡",
-            "Scores y modelo matematico":   "📐",
-            "Entidades y fuentes de datos": "🏛️",
-            "Unidades de medida":           "📏",
-        }.get(categoria, "📖")
+    total_terminos = sum(len(t) for t in _GLOSARIO.values())
 
-        with st.expander(f"{icono} {categoria}  —  {len(terminos)} terminos", expanded=False):
+    if busqueda.strip():
+        # Busqueda en sigla + nombre + descripcion (case-insensitive)
+        q = busqueda.strip().lower()
+        resultados: list[tuple[str, str, str, str]] = []
+        for categoria, terminos in _GLOSARIO.items():
             for sigla, nombre, descripcion in terminos:
+                if q in sigla.lower() or q in nombre.lower() or q in descripcion.lower():
+                    resultados.append((categoria, sigla, nombre, descripcion))
+
+        if resultados:
+            st.success(f"**{len(resultados)} resultado(s)** encontrado(s) para «{busqueda}»")
+            for categoria, sigla, nombre, descripcion in resultados:
+                icono = _ICONOS.get(categoria, "📖")
                 st.markdown(
                     f"<div style='border-left: 4px solid #2563EB; padding: 10px 16px; "
-                    f"margin-bottom: 12px; background:#1e293b; border-radius: 0 6px 6px 0;'>"
-                    f"<span style='font-size:1.05em; font-weight:700; color:#60A5FA;'>{sigla}</span>"
+                    f"margin-bottom: 10px; background:#1e293b; border-radius: 0 6px 6px 0;'>"
+                    f"<span style='font-size:0.78em; color:#64748B; font-style:italic;'>"
+                    f"{icono} {categoria}</span><br>"
+                    f"<span style='font-size:1.08em; font-weight:700; color:#60A5FA;'>{sigla}</span>"
                     f"<span style='color:#94A3B8; font-size:0.9em;'> — {nombre}</span><br>"
                     f"<span style='color:#E2E8F0; font-size:0.92em; line-height:1.6;'>{descripcion}</span>"
                     f"</div>",
                     unsafe_allow_html=True,
                 )
+        else:
+            st.warning(f"No se encontro ningun termino que coincida con «{busqueda}». "
+                       f"Intenta con otra palabra clave.")
+    else:
+        # Sin busqueda: mostrar todas las categorias colapsadas, la primera expandida
+        st.caption(f"{total_terminos} terminos en {len(_GLOSARIO)} categorias. "
+                   f"Usa el buscador de arriba o expande la categoria que necesitas.")
+        primera = True
+        for categoria, terminos in _GLOSARIO.items():
+            icono = _ICONOS.get(categoria, "📖")
+            with st.expander(
+                f"{icono} {categoria}  —  {len(terminos)} terminos",
+                expanded=primera,
+            ):
+                for sigla, nombre, descripcion in terminos:
+                    st.markdown(
+                        f"<div style='border-left: 4px solid #2563EB; padding: 10px 16px; "
+                        f"margin-bottom: 12px; background:#1e293b; border-radius: 0 6px 6px 0;'>"
+                        f"<span style='font-size:1.05em; font-weight:700; color:#60A5FA;'>{sigla}</span>"
+                        f"<span style='color:#94A3B8; font-size:0.9em;'> — {nombre}</span><br>"
+                        f"<span style='color:#E2E8F0; font-size:0.92em; line-height:1.6;'>{descripcion}</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+            primera = False
 
     st.divider()
     st.markdown(
