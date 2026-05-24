@@ -3676,8 +3676,7 @@ def main() -> None:
         layout="wide",
     )
 
-    st.title("☀️ Viabilidad Solar Agrivoltaica — Colombia")
-    st.caption("Modelo multidimensional: Fisico (30%) · Electrico (25%) · Economico (20%) · Agropecuario (15%) · Riesgo (10%)")
+    st.title("🌿☀️ Granja Solar Agrivoltaica Colombia — Viabilidad y Rentabilidad Municipal")
 
     try:
         df, fuente = load_data()
@@ -3689,22 +3688,34 @@ def main() -> None:
         )
         st.stop()
 
-    # Badge discreto de la fuente activa
+    df_rent = load_rentabilidad()
+
+    # ── Subtitulo con estado real de los dos modelos ───────────────────────────
+    n_mun_v = len(df)
+    n_mun_r = len(df_rent) if df_rent is not None else 0
+    st.caption(
+        f"**Modelo de viabilidad multidimensional** (score 0–1): "
+        f"Fisico 30% · Electrico 25% · Economico 20% · Agropecuario 15% · Riesgo 10%  ·  "
+        f"**Modelo de rentabilidad financiera** (margen COP/ha/año): "
+        f"generacion × PPA − (CAPEX CRF + interconexion + logistica + OPEX + agua + riesgo)"
+    )
+
+    # ── Badge de fuente de datos ───────────────────────────────────────────────
     if fuente == "mysql":
         st.caption(
-            f"📡 Datos en vivo desde MySQL (`{MYSQL_CONFIG['database']}.{MYSQL_TABLE}`) — "
-            f"{len(df):,} municipios"
+            f"📡 **Viabilidad:** datos en vivo desde MySQL (`{MYSQL_CONFIG['database']}.{MYSQL_TABLE}`) — "
+            f"{n_mun_v:,} municipios  ·  "
+            f"{'📊 **Rentabilidad:** ' + str(n_mun_r) + ' municipios (CSV)' if n_mun_r > 0 else '⚠️ CSV rentabilidad no encontrado'}"
         )
     else:
         st.caption(
-            f"📁 Datos desde CSV ({MULTIDIM_PATH.name}) — {len(df):,} municipios. "
-            f"Configura `.env` con credenciales MySQL para leer de la base de datos."
+            f"📁 **Viabilidad:** `{MULTIDIM_PATH.name}` — {n_mun_v:,} municipios · 114 variables  ·  "
+            f"{'📊 **Rentabilidad:** `rentabilidad_municipal.csv` — ' + str(n_mun_r) + ' municipios · 161 variables' if n_mun_r > 0 else '⚠️ CSV rentabilidad no encontrado'}  ·  "
+            f"Fuentes: NASA Power · Solargis PVOUT · UPME · RUNAP · UPRA EVA · INVIAS · SUI · IRENA · NREL"
         )
 
     top5 = df.head(5).reset_index(drop=True)
     numero1 = top5.iloc[0]
-
-    df_rent = load_rentabilidad()
 
     tab_ranking, tab_raw, tab_agro, tab_fin, tab_rent, tab_comp, tab_glosario = st.tabs([
         "Ranking",
