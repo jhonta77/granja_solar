@@ -455,6 +455,7 @@ def style_table(df: pd.DataFrame) -> pd.DataFrame.style:
 
 # Leyendas fijas por variable: (fuente, que_mide, como_entra_al_score, alerta)
 VAR_LEGENDS: dict[str, dict[str, str]] = {
+    # ── Fisico ─────────────────────────────────────────────────────────────────
     "allsky_sfc_sw_dwn_media_kwh_m2_day": {
         "fuente": "NASA Power (2001-2022, promedio multianual)",
         "que_mide": "Energia solar total que llega a la superficie por dia. Es la materia prima del proyecto: sin irradiacion no hay generacion posible.",
@@ -463,10 +464,17 @@ VAR_LEGENDS: dict[str, dict[str, str]] = {
         "alerta": "",
     },
     "pvout_kwh_kwp_day": {
-        "fuente": "Solargis PVOUT (modelo satelital)",
-        "que_mide": "Energia real que produce 1 kWp instalado, ya descontando perdidas por temperatura, angulo solar y eficiencia del sistema. Es el dato que usan los bancos para financiar proyectos.",
-        "escala": "Varia de ~3.0 a ~5.8 kWh/kWp/dia. Siempre menor que la irradiacion bruta porque incorpora las perdidas reales del sistema.",
-        "score": "Mayor PVOUT → mayor score_fisico. Es la variable con mayor peso dentro de la dimension fisica porque refleja generacion real, no solo recurso bruto.",
+        "fuente": "Solargis PVOUT (modelo satelital, ~1 km resolucion)",
+        "que_mide": "Energia real que produce 1 kWp instalado por dia, ya descontando perdidas por temperatura, angulo solar y eficiencia. Es el dato que usan los bancos para financiar proyectos.",
+        "escala": "Varia de ~3.0 a ~5.8 kWh/kWp/dia en Colombia. Siempre menor que la irradiacion bruta porque incorpora perdidas reales del sistema.",
+        "score": "Mayor PVOUT → mayor score_fisico. Es la variable de mayor peso en la dimension fisica porque refleja generacion real, no solo recurso bruto. La tab 'Solar vs Agrivoltaico' usa este valor por municipio.",
+        "alerta": "",
+    },
+    "generacion_kwh_ha_year": {
+        "fuente": "Calculado: PVOUT × kW/ha × 365 dias (modelo base NREL/IRENA)",
+        "que_mide": "Energia electrica total generada por hectarea al año, considerando el PVOUT real del municipio y la densidad de paneles del modelo agrivoltaico (312.8 kW/ha = 7.9 acres/MW NREL).",
+        "escala": "Varia de ~300,000 kWh/ha/año (zonas nubladas) a ~700,000 kWh/ha/año (La Guajira). Es la variable que mas impacta el ingreso del proyecto.",
+        "score": "No entra directamente al score multidimensional, pero es la base del ingreso en el tab Rentabilidad: ingreso = generacion × PPA.",
         "alerta": "",
     },
     "t2m_media": {
@@ -479,96 +487,158 @@ VAR_LEGENDS: dict[str, dict[str, str]] = {
     "prectotcorr_suma_mm_year": {
         "fuente": "NASA Power (precipitacion total corregida, suma anual)",
         "que_mide": "Milimetros de lluvia acumulada al año. Proxy de nubosidad: mas lluvia generalmente implica mas dias nublados y menos irradiacion directa.",
-        "escala": "Colombia es uno de los paises mas lluviosos del mundo. Varia de ~200 mm/año (La Guajira) hasta >8000 mm/año (Choco). Distribucion muy sesgada a la derecha.",
-        "score": "Menos precipitacion → mejor score_fisico. Pero el PVOUT ya captura buena parte del efecto de nubosidad, por lo que esta variable tiene peso secundario.",
+        "escala": "Varia de ~200 mm/año (La Guajira seca) hasta >8,000 mm/año (Choco). Distribucion muy sesgada a la derecha.",
+        "score": "Menos precipitacion → mejor score_fisico. El PVOUT ya captura buena parte del efecto de nubosidad, por lo que esta variable tiene peso secundario.",
         "alerta": "",
     },
     "ws10m_media": {
         "fuente": "NASA Power (velocidad del viento a 10 metros, promedio anual)",
-        "que_mide": "Viento medio. Cumple dos roles opuestos: enfria los paneles (mejora eficiencia) pero tambien genera cargas estructurales sobre los soportes.",
-        "escala": "En Colombia continental: 1-5 m/s. La Guajira supera 8 m/s. Distribucion sesgada con cola derecha en zonas costeras.",
-        "score": "Entra tanto en score_fisico (enfriamiento positivo) como en score_riesgo (viento extremo negativo). El score_riesgo_viento_modelo ya es la version normalizada.",
-        "alerta": "⚠️ score_riesgo usa solo esta variable porque los indices IMRC de inundacion/sequia no fueron cargados.",
-    },
-    "dist_subestacion_km": {
-        "fuente": "UPME — Red de subestaciones del Sistema Interconectado Nacional",
-        "que_mide": "Distancia en linea recta al punto de conexion a la red electrica mas cercano. Es el determinante economico mas critico: cada km de linea de transmision cuesta entre USD 80,000 y 200,000.",
-        "escala": "La mayoria de municipios esta dentro de 0-60 km. Cola larga con municipios remotos hasta 700+ km (Amazonia, Pacifico).",
-        "score": "Menor distancia → mayor score_electrico (peso 50% dentro de la dimension). Si el Top 5 tiene lineas verticales en 0-20 km, esto explica gran parte del ranking.",
+        "que_mide": "Viento medio. Cumple dos roles: enfria los paneles (mejora eficiencia) pero genera cargas estructurales sobre los soportes. La Guajira tiene vientos extraordinariamente altos.",
+        "escala": "En Colombia continental: 1-5 m/s. La Guajira supera 8 m/s. Distribucion sesgada con cola derecha.",
+        "score": "Entra al score_fisico (enfriamiento positivo) y al score_riesgo (viento extremo negativo). El score_riesgo_viento_modelo es la version normalizada.",
         "alerta": "",
     },
-    "tension_mas_cercana": {
-        "fuente": "UPME",
-        "que_mide": "Tension en kV de la subestacion mas cercana.",
-        "escala": "No disponible como numero: el CSV contiene texto mixto como '500/115' para subestaciones de doble devanado.",
-        "score": "El scoring usa nivel_tension_mas_cercana (Nivel 1-5) mapeado a 0.0-1.0. Esta columna cruda no es procesable directamente.",
-        "alerta": "⚠️ Columna no numerica. El scoring usa la columna nivel_tension_mas_cercana en su lugar.",
+    # ── Electrico ──────────────────────────────────────────────────────────────
+    "dist_subestacion_km": {
+        "fuente": "UPME — Red de subestaciones del Sistema Interconectado Nacional",
+        "que_mide": "Distancia en linea recta al punto de conexion a la red electrica mas cercano. Cada km de linea de transmision cuesta entre USD 80,000 y 200,000.",
+        "escala": "La mayoria de municipios esta dentro de 0-60 km. Cola larga con municipios remotos hasta 700+ km (Amazonia, Pacifico).",
+        "score": "Menor distancia → mayor score_electrico (peso 50%). Tambien entra directamente al costo_interconexion en el modelo de rentabilidad.",
+        "alerta": "",
     },
     "capacidad_mva_mas_cercana": {
         "fuente": "UPME — capacidad de transformacion instalada",
-        "que_mide": "Megavoltamperios disponibles en la subestacion mas cercana. Aunque la subestacion este cerca, si esta saturada no puede absorber energia nueva sin costosas ampliaciones.",
-        "escala": "Subestaciones rurales: 10-40 MVA. Subestaciones troncales: 200-900 MVA. Distribucion muy sesgada: la mayoria son pequeñas, unas pocas son enormes.",
-        "score": "Mayor capacidad → mayor score_electrico (peso 20%). La linea verde en ~900 MVA del Top 5 indica que uno de los municipios top tiene acceso a una subestacion troncal de gran capacidad.",
+        "que_mide": "Megavoltamperios disponibles en la subestacion mas cercana. Si esta saturada no puede absorber energia nueva sin costosas ampliaciones.",
+        "escala": "Subestaciones rurales: 10-40 MVA. Subestaciones troncales: 200-900 MVA. Distribucion muy sesgada.",
+        "score": "Mayor capacidad → mayor score_electrico (peso 20%). Una subestacion grande significa que puede inyectar mas potencia sin necesitar refuerzos de red.",
         "alerta": "",
     },
+    "dist_via_primaria_km": {
+        "fuente": "INVIAS — Red vial nacional primaria",
+        "que_mide": "Distancia en km a la via primaria mas cercana (carretera pavimentada de primer orden). Determina el costo de transporte de equipos y materiales durante la construccion.",
+        "escala": "0 = sobre la via primaria. Municipios remotos pueden estar a 50-200 km de una via primaria. Afecta directamente el costo de logistica.",
+        "score": "No entra directamente al score multidimensional, pero si al costo_logistica_vias en el modelo de rentabilidad: mayor distancia = mayor costo de instalacion.",
+        "alerta": "",
+    },
+    # ── Economico ──────────────────────────────────────────────────────────────
     "score_tierra_modelo": {
         "fuente": "UPRA / imputacion departamental",
-        "que_mide": "Score ya normalizado (0-1) del precio de la tierra. Mayor score = tierra mas barata = menor costo de instalacion. Los datos brutos (COP/ha) estan en CSV externo.",
-        "escala": "0 = tierra mas cara del pais, 1 = tierra mas barata. Si la distribucion se concentra en pocos valores, indica que muchos municipios recibieron el mismo valor imputado.",
-        "score": "Entra directamente al score_economico (peso variable). La imputacion usa mediana departamental cuando no hay dato directo del municipio.",
+        "que_mide": "Score normalizado (0-1) del precio de la tierra. Mayor score = tierra mas barata = menor costo de instalacion.",
+        "escala": "0 = tierra mas cara del pais, 1 = tierra mas barata. Concentracion en valores imputados indica dato sin fuente directa.",
+        "score": "Entra directamente al score_economico. La imputacion usa mediana departamental cuando no hay dato directo.",
         "alerta": "⚠️ Muchos municipios pueden tener valor imputado, no dato real de mercado.",
+    },
+    "precio_tierra_ha_cop": {
+        "fuente": "UPRA — Avaluos catastrales / lonjas de propiedad raiz",
+        "que_mide": "Precio de mercado de la tierra agricola en COP por hectarea. Dato bruto antes de normalizar.",
+        "escala": "Varia entre ~2M COP/ha (zonas remotas) y >50M COP/ha (tierra cerca de ciudades o con vocacion intensiva). Muchos municipios sin dato directo.",
+        "score": "Se normaliza a score_tierra_modelo. Mayor precio = menor score. Entra al costo_oportunidad_agro en el modelo de rentabilidad.",
+        "alerta": "⚠️ Muchos municipios con dato NaN — la imputacion usa mediana departamental.",
     },
     "score_agua_modelo": {
         "fuente": "SUI (Sistema Unico de Informacion de Servicios Publicos) / imputacion",
-        "que_mide": "Score normalizado (0-1) de la tarifa de acueducto. Agua barata = menor costo operativo de limpieza de paneles.",
-        "escala": "0 = tarifa mas alta, 1 = tarifa mas baja. Distribucion puede tener picos en valores de imputacion.",
-        "score": "Entra al score_economico. La limpieza de paneles requiere ~98 litros/MWh generado. En zonas con agua cara, el costo operativo sube.",
+        "que_mide": "Score normalizado (0-1) de la tarifa de acueducto. Agua barata = menor costo de limpieza de paneles.",
+        "escala": "0 = tarifa mas alta, 1 = tarifa mas baja.",
+        "score": "Entra al score_economico. La limpieza de paneles requiere ~98 litros/MWh generado.",
         "alerta": "⚠️ Muchos municipios con dato imputado por mediana nacional o departamental.",
     },
-    "ugg_ha_proxy": {
-        "fuente": "EVA Pecuaria ICA — inventario bovino 2019-2023",
-        "que_mide": "Unidades Gran Ganado por hectarea. Mide la presion ganadera: cuantas cabezas equivalentes de ganado hay por hectarea del municipio.",
-        "escala": "0-1 extensivo bajo, 1-3 tradicional, >3 tecnificado. La mayoria de municipios colombianos son extensivos.",
-        "score": "Mayor UGG/ha → mayor costo de oportunidad → score agropecuario alto en modelo agrivoltaico (la solar convive con el ganado).",
-        "alerta": "⚠️ DATO NO DISPONIBLE EN EL CSV FINAL. El archivo fue generado pero no se unio correctamente al pipeline de scoring. El score_agropecuario actual no incluye carga ganadera.",
+    "tarifa_acueducto_m3_cop": {
+        "fuente": "SUI — Sistema Unico de Informacion de Servicios Publicos",
+        "que_mide": "Costo del metro cubico de agua potable en COP. Dato bruto antes de normalizar. El agua se usa para limpiar los paneles regularmente.",
+        "escala": "Tipicamente entre 500 y 5,000 COP/m³ en municipios colombianos. Zonas rurales remotas pueden tener tarifas mas bajas o datos faltantes.",
+        "score": "Se normaliza a score_agua_modelo. Entra al costo_agua_limpieza en el modelo de rentabilidad.",
+        "alerta": "⚠️ Dato no disponible para muchos municipios rurales.",
+    },
+    # ── Agropecuario ──────────────────────────────────────────────────────────
+    "carga_bovina_proxy_cabezas_ha_municipio": {
+        "fuente": "EVA Pecuaria ICA — inventario bovino 2019-2023 / area municipal IGAC",
+        "que_mide": "Cabezas de ganado bovino por hectarea del municipio. Mide la presion ganadera actual: cuantas vacas hay por hectarea disponible.",
+        "escala": "0.0 = muy extensivo (menos de 0.1 cab/ha). 0.3-1.0 = uso ganadero activo. >1.5 = intensivo. Colombia promedia ~0.25 cab/ha.",
+        "score": "Mayor carga bovina indica que la tierra ya tiene uso ganadero consolidado — es compatible con el modelo agrivoltaico que mantiene ganado bajo los paneles.",
+        "alerta": "",
+    },
+    "inventario_bovinos": {
+        "fuente": "EVA Pecuaria ICA — inventario bovino municipal",
+        "que_mide": "Total de cabezas de ganado bovino en el municipio. Indica el volumen del sector ganadero local.",
+        "escala": "Desde menos de 100 cabezas (municipios andinos pequeños) hasta 200,000+ (grandes municipios ganaderos del Caribe y Llanos).",
+        "score": "Indicador de escala del sector ganadero. Los municipios con alto inventario tienen mas experiencia en manejo de ganado, lo que reduce el riesgo del componente agrivoltaico.",
+        "alerta": "",
     },
     "pct_area_protegida_runap": {
         "fuente": "RUNAP — Registro Unico Nacional de Areas Protegidas",
-        "que_mide": "Porcentaje del area del municipio bajo alguna figura de proteccion ambiental (parques nacionales, reservas, sitios Ramsar). En area protegida NO se puede instalar solar.",
-        "escala": "0% (sin proteccion) a 100% (completamente protegido). Distribucion muy sesgada: municipios andinos/cafeteros con <10%, Amazonia con >70%.",
-        "score": "Mayor % protegido → menor score_agropecuario. Se invierte: u_i_no_protegido_runap = 1 - pct. Las lineas del Top 5 en valores bajos (0-5%) confirman que los mejores municipios tienen poca restriccion ambiental.",
+        "que_mide": "Porcentaje del area del municipio bajo proteccion ambiental (parques nacionales, reservas, sitios Ramsar). En area protegida NO se puede instalar solar.",
+        "escala": "0% (sin proteccion) a 100% (completamente protegido). Municipios andinos <10%, Amazonia >70%.",
+        "score": "Mayor % protegido → menor score_agropecuario. Los Top 5 con lineas en 0-5% confirman que los mejores municipios tienen poca restriccion ambiental.",
         "alerta": "",
     },
-    "riesgo_inundacion_idx": {
-        "fuente": "IMRC DNP — Indice Municipal de Riesgo de Desastres",
-        "que_mide": "Indice compuesto de amenaza + exposicion + vulnerabilidad ante inundaciones. No es solo probabilidad climatica, incorpora la capacidad de respuesta del municipio.",
-        "escala": "0 = sin riesgo, 1 = maximo riesgo. Municipios ribereños del Caribe y Pacifico tienen valores altos.",
-        "score": "Mayor riesgo → menor score_riesgo. Se invierte en el modelo.",
-        "alerta": "⚠️ DATO NO DISPONIBLE. Los datos IMRC nunca fueron descargados ni cargados al pipeline. El score_riesgo se calcula SIN este indice.",
+    "area_no_protegida_km2_runap": {
+        "fuente": "RUNAP — calculo: area_total - area_protegida",
+        "que_mide": "Kilometros cuadrados del municipio disponibles para instalacion solar (fuera de areas protegidas). Es el techo maximo de expansion del proyecto.",
+        "escala": "Municipios pequenos: <200 km². Municipios grandes de Llanos o Amazonia: >5,000 km². 1 km² = 100 ha.",
+        "score": "Area disponible mayor → mayor potencial de escala. Entra al calculo de MW potenciales y ha_viable en el modelo.",
+        "alerta": "",
     },
-    "riesgo_sequia_idx": {
-        "fuente": "IMRC DNP — Indice Municipal de Riesgo de Desastres",
-        "que_mide": "Indice compuesto de riesgo ante sequia: amenaza climatica + exposicion de cultivos y poblacion + vulnerabilidad institucional.",
-        "escala": "0 = sin riesgo, 1 = maximo riesgo. La Guajira y Caribe seco tienen valores altos.",
-        "score": "Mayor riesgo sequia → menor score_riesgo. La sequia afecta el agua disponible para limpieza de paneles.",
-        "alerta": "⚠️ DATO NO DISPONIBLE. Los datos IMRC nunca fueron descargados. El score_riesgo se calcula SIN este indice.",
-    },
+    # ── Riesgo ─────────────────────────────────────────────────────────────────
     "score_riesgo_viento_modelo": {
         "fuente": "NASA Power ws10m_media, normalizado e imputado",
-        "que_mide": "Score de riesgo estructural por viento. Alto score = poco riesgo de viento. Se construyo a partir del viento medio: viento extremo (>8 m/s) penaliza.",
-        "escala": "0-1. Media nacional 0.934, rango 0.93-1.0 para el 95% de municipios. La concentracion cerca de 1.0 indica que casi todo el pais tiene viento moderado.",
-        "score": "Es la UNICA variable de riesgo actualmente en el calculo. Dado que casi todos los municipios tienen score ~0.93-0.95, esta dimension apenas diferencia entre municipios.",
-        "alerta": "⚠️ PROBLEMA DE DISCRIMINACION: score_riesgo es casi identico para todos los municipios porque solo usa viento (que es homogeneo en Colombia). Sin datos de inundacion y sequia, la dimension Riesgo no aporta informacion real al ranking.",
+        "que_mide": "Score de riesgo estructural por viento. Alto score = poco riesgo. Se construyo penalizando viento extremo (>8 m/s) que dania estructuras.",
+        "escala": "0-1. El 95% de municipios tiene score ~0.93-0.95 (Colombia tiene viento moderado). Solo La Guajira y costa Caribe muestran valores mas bajos.",
+        "score": "Es la UNICA variable de riesgo actualmente en el calculo del score multidimensional. Da muy poca diferenciacion entre municipios por la homogeneidad del viento.",
+        "alerta": "⚠️ La dimension Riesgo apenas diferencia municipios porque solo usa viento. Los indices IMRC de inundacion/sequia no fueron cargados al pipeline de scoring.",
+    },
+    "costo_riesgo_climatico_cop_ha_year": {
+        "fuente": "Modelo propio: penalizacion por riesgo climatico (viento extremo) sobre OPEX",
+        "que_mide": "Costo adicional por hectarea/año atribuible al riesgo climatico. Municipios con mayor riesgo climatico tienen mayores costos de mantenimiento y seguros.",
+        "escala": "Tipicamente entre 0 y 2M COP/ha/año. Municipios con viento extremo o alta precipitacion tienen penalizaciones mayores.",
+        "score": "Entra directamente al costo_total en el modelo de rentabilidad. A mayor costo de riesgo, menor margen del proyecto.",
+        "alerta": "",
+    },
+    # ── Rentabilidad ───────────────────────────────────────────────────────────
+    "costo_capex_anual_cop_ha_year": {
+        "fuente": "Modelo: CAPEX total anualizado con CRF (WACC=8%, n=25 años)",
+        "que_mide": "Cuota anual equivalente del CAPEX. Se calcula como CAPEX_total × CRF. Es el costo dominante: representa el 80-85% del costo total anual.",
+        "escala": "Tipicamente 50-90 M COP/ha/año segun el CAPEX del municipio (afecta distancia a subestacion y logistica). Con USD 700/kW y TRM 4,000: ~875 M COP/ha / 25 años ≈ 35 M/año lineal.",
+        "score": "No entra al score multidimensional pero es el mayor driver del margen en Rentabilidad. Si el CAPEX sube, el punto de equilibrio de PPA sube proporcionalmente.",
+        "alerta": "",
+    },
+    "costo_interconexion_cop_ha_year": {
+        "fuente": "Modelo: dist_subestacion_km × costo_por_km_linea / area_proyecto",
+        "que_mide": "Costo anualizado de la linea de transmision para conectar el proyecto a la subestacion mas cercana. Es el segundo costo mas variable entre municipios.",
+        "escala": "0 (a pie de subestacion) hasta varios M COP/ha/año para municipios remotos. Diferencia mayor entre municipios que el propio OPEX.",
+        "score": "No entra al score multidimensional directamente (solo via score_electrico). En Rentabilidad es el segundo driver mas importante del margen.",
+        "alerta": "",
+    },
+    "costo_logistica_vias_cop_ha_year": {
+        "fuente": "Modelo: dist_via_primaria_km × costo_flete / vida_util",
+        "que_mide": "Costo de transporte de paneles, inversores y equipos desde las vias principales al predio. Se amortiza durante la vida del proyecto.",
+        "escala": "Bajo para municipios bien comunicados (<500k COP/ha/año). Alto para municipios remotos (>2M COP/ha/año).",
+        "score": "Penaliza municipios con mala conectividad vial, que pueden tener buen recurso solar pero acceso dificil para la construccion.",
+        "alerta": "",
+    },
+    "costo_total_estimado_cop_ha_year": {
+        "fuente": "Suma: CAPEX anualizado + interconexion + logistica + OPEX + agua + oportunidad agro + riesgo climatico",
+        "que_mide": "Costo total anual por hectarea del proyecto solar. Es el umbral que debe superar el ingreso (generacion × PPA) para que el proyecto sea rentable.",
+        "escala": "Tipicamente entre 70 y 120 M COP/ha/año. El CAPEX representa el 80-85%, el resto son costos operativos.",
+        "score": "No entra al score multidimensional pero es la variable clave del tab Rentabilidad. Con PPA=160 y generacion tipica, la mayoria de municipios no supera este umbral.",
+        "alerta": "",
+    },
+    "margen_estimado_cop_ha_year": {
+        "fuente": "Calculado: ingreso_energia - costo_total (con PPA=160 COP/kWh base CSV)",
+        "que_mide": "Ganancia o perdida anual por hectarea del proyecto solar. Positivo = el proyecto cubre todos sus costos y genera utilidad. Negativo = el proyecto pierde dinero al PPA base.",
+        "escala": "La mayoria de municipios tiene margen negativo con PPA=160 (-20 a -50 M COP/ha/año). Solo los mejor posicionados (alta generacion + bajos costos) logran margen positivo.",
+        "score": "Es la base del tab Rentabilidad. El slider de PPA recalcula este margen en tiempo real para todos los municipios.",
+        "alerta": "⚠️ El margen aqui mostrado usa PPA=160 COP/kWh (valor del CSV). En el tab Rentabilidad puedes ajustar el PPA con el slider para ver como cambia.",
     },
 }
 
 RAW_DIMS: dict[str, tuple[str, str, list[tuple[str, str]]]] = {
     "Fisico": (
         "#2563EB",
-        "Variables climaticas y de recurso solar antes de normalizar (0-1).",
+        "Recurso solar y clima: determinan cuanta energia puede generar cada municipio.",
         [
-            ("allsky_sfc_sw_dwn_media_kwh_m2_day", "Irradiacion solar (kWh/m²/dia)"),
-            ("pvout_kwh_kwp_day",                  "Rendimiento PV (kWh/kWp/dia)"),
+            ("allsky_sfc_sw_dwn_media_kwh_m2_day", "Irradiacion solar bruta (kWh/m²/dia)"),
+            ("pvout_kwh_kwp_day",                  "PVOUT real Solargis (kWh/kWp/dia)"),
+            ("generacion_kwh_ha_year",             "Generacion anual real (kWh/ha/año)"),
             ("t2m_media",                          "Temperatura media 2m (°C)"),
             ("prectotcorr_suma_mm_year",           "Precipitacion anual (mm/año)"),
             ("ws10m_media",                        "Viento medio 10m (m/s)"),
@@ -576,36 +646,50 @@ RAW_DIMS: dict[str, tuple[str, str, list[tuple[str, str]]]] = {
     ),
     "Electrico": (
         "#16A34A",
-        "Infraestructura de red: distancia y capacidad antes de normalizar.",
+        "Infraestructura de red y acceso vial: determinan el costo de conexion y construccion.",
         [
-            ("dist_subestacion_km",       "Distancia a subestacion (km)"),
-            ("tension_mas_cercana",       "Tension subestacion (kV)"),
-            ("capacidad_mva_mas_cercana", "Capacidad (MVA)"),
+            ("dist_subestacion_km",       "Distancia a subestacion SIN (km)"),
+            ("capacidad_mva_mas_cercana", "Capacidad subestacion (MVA)"),
+            ("dist_via_primaria_km",      "Distancia a via primaria INVIAS (km)"),
         ],
     ),
     "Economico": (
         "#D97706",
-        "Scores de tierra y agua (ya en 0-1; datos brutos en CSV externos).",
+        "Costos de tierra y agua: determinan la inversion inicial y el costo operativo.",
         [
-            ("score_tierra_modelo", "Score precio tierra (0-1)"),
-            ("score_agua_modelo",   "Score tarifa agua (0-1)"),
+            ("score_tierra_modelo",    "Score precio tierra 0-1 (mayor = mas barata)"),
+            ("precio_tierra_ha_cop",   "Precio tierra bruto (COP/ha)"),
+            ("score_agua_modelo",      "Score tarifa agua 0-1 (mayor = mas barata)"),
+            ("tarifa_acueducto_m3_cop","Tarifa acueducto bruta (COP/m³)"),
         ],
     ),
     "Agropecuario": (
         "#DC2626",
-        "Carga ganadera y area protegida antes de normalizar.",
+        "Ganaderia y uso del suelo: definen la viabilidad del modelo agrivoltaico mixto.",
         [
-            ("ugg_ha_proxy",             "UGG por hectarea (carga ganadera)"),
-            ("pct_area_protegida_runap", "% area protegida RUNAP"),
+            ("carga_bovina_proxy_cabezas_ha_municipio", "Carga bovina real (cab/ha municipio)"),
+            ("inventario_bovinos",                      "Inventario bovino total (cabezas)"),
+            ("pct_area_protegida_runap",                "% area protegida RUNAP"),
+            ("area_no_protegida_km2_runap",             "Area disponible no protegida (km²)"),
         ],
     ),
     "Riesgo": (
         "#7C3AED",
-        "Indices de riesgo antes de normalizar (mayor = mas riesgo).",
+        "Riesgo climatico y estructural: penalizaciones que reducen el margen del proyecto.",
         [
-            ("riesgo_inundacion_idx",       "Indice riesgo inundacion"),
-            ("riesgo_sequia_idx",           "Indice riesgo sequia"),
-            ("score_riesgo_viento_modelo",  "Score riesgo viento (0-1)"),
+            ("score_riesgo_viento_modelo",          "Score riesgo viento 0-1 (mayor = menor riesgo)"),
+            ("costo_riesgo_climatico_cop_ha_year",  "Penalizacion riesgo climatico (COP/ha/año)"),
+        ],
+    ),
+    "Rentabilidad": (
+        "#0891B2",
+        "Costos y margen economico: muestran la estructura financiera real de cada municipio.",
+        [
+            ("costo_capex_anual_cop_ha_year",       "CAPEX anualizado CRF (COP/ha/año)"),
+            ("costo_interconexion_cop_ha_year",     "Costo interconexion red (COP/ha/año)"),
+            ("costo_logistica_vias_cop_ha_year",    "Costo logistica / vias (COP/ha/año)"),
+            ("costo_total_estimado_cop_ha_year",    "Costo total estimado (COP/ha/año)"),
+            ("margen_estimado_cop_ha_year",         "Margen neto PPA=160 (COP/ha/año)"),
         ],
     ),
 }
@@ -801,13 +885,43 @@ def _legend_card(col: str, df: pd.DataFrame, top5: pd.DataFrame, color: str) -> 
         st.error("Columna ausente en el CSV. Dato no cargado al pipeline.")
 
 
-def render_raw_tab(df: pd.DataFrame, top5: pd.DataFrame) -> None:
-    """Pestaña de distribuciones de variables crudas por dimension."""
+def render_raw_tab(df: pd.DataFrame, top5: pd.DataFrame, df_rent: pd.DataFrame | None = None) -> None:
+    """Pestaña de distribuciones de variables crudas por dimension.
+
+    df      : CSV principal de viabilidad (score multidimensional).
+    top5    : Top 5 del ranking de viabilidad.
+    df_rent : CSV de rentabilidad (contiene variables adicionales de costos y carga bovina).
+              Si se proporciona, se usa como fuente primaria para variables no presentes en df.
+    """
+    # Construir DataFrame enriquecido: df + columnas del df_rent que no esten en df
+    if df_rent is not None:
+        cols_nuevas = [c for c in df_rent.columns if c not in df.columns]
+        if cols_nuevas and "municipio" in df.columns and "municipio" in df_rent.columns:
+            df_extra = df_rent[["municipio"] + cols_nuevas].drop_duplicates("municipio")
+            df_full  = df.merge(df_extra, on="municipio", how="left")
+        else:
+            df_full = df.copy()
+        # Tambien enriquecer el top5 con columnas de df_rent
+        top5_full = top5.copy()
+        cols_t5   = [c for c in df_rent.columns if c not in top5.columns]
+        if cols_t5 and "municipio" in top5.columns:
+            t5_extra  = df_rent[["municipio"] + cols_t5].drop_duplicates("municipio")
+            top5_full = top5.merge(t5_extra, on="municipio", how="left")
+    else:
+        df_full   = df.copy()
+        top5_full = top5.copy()
+
     st.subheader("Distribucion de variables antes de normalizar")
     st.caption(
-        "Cada histograma muestra como se distribuyen los ~1100 municipios de Colombia en esa variable cruda. "
+        "Cada histograma muestra como se distribuyen los ~1,100 municipios de Colombia en esa variable cruda. "
         "Las lineas verticales de colores indican donde cae cada uno de los Top 5 del ranking. "
         "A la derecha de cada grafica encontraras la fuente, interpretacion, escala y hallazgos de los datos."
+    )
+
+    st.info(
+        f"**Dataset enriquecido:** {len(df_full):,} municipios · "
+        f"{len(df_full.columns)} variables disponibles "
+        f"({'viabilidad + rentabilidad' if df_rent is not None else 'solo viabilidad'})."
     )
 
     dim_tabs = st.tabs(list(RAW_DIMS.keys()))
@@ -815,20 +929,20 @@ def render_raw_tab(df: pd.DataFrame, top5: pd.DataFrame) -> None:
         with dim_tab:
             st.caption(caption)
 
-            missing = [lbl for col, lbl in variables if col not in df.columns]
+            missing = [lbl for col, lbl in variables if col not in df_full.columns]
             if missing:
-                st.warning(f"Sin datos en el CSV: {', '.join(missing)}")
+                st.warning(f"Sin datos disponibles: {', '.join(missing)}")
 
-            available = [(col, lbl) for col, lbl in variables if col in df.columns]
+            available = [(col, lbl) for col, lbl in variables if col in df_full.columns]
 
-            # Variables no disponibles — mostrar leyenda aunque no haya grafica
+            # Variables no disponibles — solo mostrar leyenda
             for col, lbl in variables:
-                if col in df.columns:
+                if col in df_full.columns:
                     continue
                 st.markdown(f"#### {lbl}")
                 leg_col, _ = st.columns([1, 1])
                 with leg_col:
-                    _legend_card(col, df, top5, color)
+                    _legend_card(col, df_full, top5_full, color)
                 st.divider()
 
             # Variables disponibles — grafica + leyenda lado a lado
@@ -836,23 +950,23 @@ def render_raw_tab(df: pd.DataFrame, top5: pd.DataFrame) -> None:
                 st.markdown(f"#### {lbl}")
                 chart_col, legend_col = st.columns([3, 2])
                 with chart_col:
-                    fig = chart_raw_variable(df, col, lbl, color, top5)
+                    fig = chart_raw_variable(df_full, col, lbl, color, top5_full)
                     if fig is not None:
                         st.plotly_chart(fig, use_container_width=True)
                     else:
-                        st.info("Variable presente pero sin valores numericos.")
+                        st.info("Variable presente pero sin valores numericos suficientes.")
                 with legend_col:
-                    _legend_card(col, df, top5, color)
+                    _legend_card(col, df_full, top5_full, color)
                 st.divider()
 
-            # Estadisticas basicas al final
-            stat_cols = [c for c, _ in available if c in df.columns]
+            # Estadisticas descriptivas al final de cada dimension
+            stat_cols = [c for c, _ in available if c in df_full.columns]
             if stat_cols:
-                with st.expander("Estadisticas descriptivas de todas las variables"):
-                    num_cols = [c for c in stat_cols if pd.to_numeric(df[c], errors="coerce").notna().any()]
+                with st.expander("Estadisticas descriptivas de esta dimension"):
+                    num_cols = [c for c in stat_cols if pd.to_numeric(df_full[c], errors="coerce").notna().any()]
                     if num_cols:
                         label_map = {col: lbl for col, lbl in available}
-                        stats = df[num_cols].apply(pd.to_numeric, errors="coerce").describe().T.round(3)
+                        stats = df_full[num_cols].apply(pd.to_numeric, errors="coerce").describe().T.round(3)
                         stats.index = stats.index.map(lambda c: label_map.get(c, c))
                         st.dataframe(stats, use_container_width=True)
 
@@ -3603,7 +3717,7 @@ def main() -> None:
     ])
 
     with tab_raw:
-        render_raw_tab(df, top5)
+        render_raw_tab(df, top5, df_rent=df_rent)
 
     with tab_agro:
         render_agrivoltaico_tab(df, top5)
