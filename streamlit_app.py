@@ -862,15 +862,19 @@ def render_raw_tab(df: pd.DataFrame, top5: pd.DataFrame) -> None:
 # ---------------------------------------------------------------------------
 
 # Parametros fijos del modelo agrivoltaico (NREL / AGROSAVIA / FEDEGAN)
-_HA_POR_MW        = 2.02    # NREL: 5 acres/MW utility PV
+_HA_POR_MW        = 3.197   # NREL: 7.9 acres/MW AREA TOTAL (incluye vias, retiros, espaciado entre filas)
+                            # Equivale a 312.8 kW/ha — misma base del Comparativo y CSV Rentabilidad
+                            # NO usar 5 acres/MW (area directa bajo paneles) para proyectos reales
 _KG_CARNE_UGG_AÑO = 250.0  # kg carne viva por UGG por año (conservador)
 _AGUA_M3_POR_MWH  = 0.098  # NREL: litros de lavado (m³/MWh)
 
-# Defaults economicos compartidos entre pestañas (Agrivoltaico y Viabilidad Financiera)
-_DEFAULT_PRECIO_ENERGIA = 200       # COP/kWh — PPA bilateral solar Colombia 2024 realista
+# Defaults economicos compartidos entre TODAS las pestañas
+# ── CONGRUENCIA: estos valores se usan igual en Agrivoltaico, Financiera y Comparativo ──
+_DEFAULT_PRECIO_ENERGIA = 200       # COP/kWh — PPA bilateral solar Colombia 2024 (rango mercado: 180-260)
 _DEFAULT_PRECIO_CARNE   = 10_000    # COP/kg carne viva en pie (novillo gordo Colombia 2024)
-_DEFAULT_UGG_AGRO       = 2.0       # UGG/ha bajo paneles (AGROSAVIA silvopastoral)
-_DEFAULT_UGG_TRAD       = 1.5       # UGG/ha sistema tradicional (tropico bajo)
+_DEFAULT_UGG_AGRO       = 4.0       # UGG/ha bajo paneles — equivalente a 6 vacas/ha (promedio 300-350 kg c/u ≈ 0.67 UGG)
+                                    # La sombra de los paneles mejora el pasto en tropico calido (AGROSAVIA)
+_DEFAULT_UGG_TRAD       = 1.5       # UGG/ha sistema tradicional sin sombra (tropico bajo)
 _DEFAULT_TARIFA_AGUA    = 1_800     # COP/m³ default (mediana SUI)
 
 
@@ -1222,11 +1226,15 @@ _PCT_CULTIVADO        = 0.15   # 15% frontera agricola activa (UPRA)
 _FACTOR_USO_NO_SOLAR  = _PCT_URBANO + _PCT_VIAS + _PCT_HIDRICO + _PCT_CULTIVADO  # 0.28
 
 _PANEL_W             = 600        # Wp por modulo (bifacial Tier-1 2024 utility-scale)
-_PANEL_COST_COP      = 420_000    # COP por modulo (USD 105/panel a 4,000 COP/USD; NREL Q1-2024 USD 0.21/W)
+_PANEL_COST_COP      = 420_000    # COP por modulo (USD 105/panel a TRM 4,000; NREL Q1-2024 USD 0.21/W)
+                                  # En kW: USD 105 / 0.6 kW = USD 175/kW para modulos solos
 _PANEL_LIFE_YEARS    = 25         # vida util de los modulos (garantia fabricante)
-_BOS_M_COP_POR_MW    = 2_900.0    # M COP/MW: resto del sistema (inversores, estructura, BOS, instalacion, soft)
+_BOS_M_COP_POR_MW    = 2_100.0    # M COP/MW: inversores, estructura ELEVADA agrivoltaica, BOS, instalacion, soft
+                                  # USD 525/kW a TRM 4,000 → total con paneles: USD 700/kW (IRENA 2025 + prima agrivoltaica)
+                                  # Antes: 2,900 M/MW ($725/kW BOS) → total $900/kW — sobreestimado frente a IRENA
 _BOS_LIFE_YEARS      = 25         # se amortiza igual que los paneles
-_CAPEX_M_COP_POR_MW  = 3_600.0    # paneles + BOS = ~USD 900/kW (suma teorica de 700 paneles + 2,900 BOS)
+_CAPEX_M_COP_POR_MW  = 2_800.0    # paneles + BOS = USD 700/kW × TRM 4,000 × 1000 kW/MW / 1e6
+                                  # Congruente con Comparativo Tab (Escenario A $700/kW) y IRENA 2025
 _VIDA_UTIL_AÑOS      = 25         # vida util default del proyecto
 _PRESTACIONES        = 1.52       # factor prestaciones sociales Colombia
 _SMMLV_MENSUAL_COP   = 1_300_000  # SMMLV 2024
@@ -2438,11 +2446,25 @@ def render_comparativo_tab() -> None:
 
     st.divider()
 
+    # ── Banner de congruencia ─────────────────────────────────────────────────
+    st.markdown("### Base tecnica compartida entre todas las pestañas")
+    st.success(
+        f"**Supuestos unificados (NREL / IRENA 2025 / AGROSAVIA):**  \n"
+        f"📐 **Densidad:** {1/_HA_POR_MW*1000:.1f} kW/ha ({_HA_POR_MW} ha/MW — area TOTAL incluyendo vias, retiros y espaciado entre filas)  ·  "
+        f"💰 **CAPEX:** USD 700/kW agrivoltaico ({_BOS_M_COP_POR_MW:,.0f} M COP/MW BOS + paneles)  ·  "
+        f"⚡ **Rendimiento:** 1,478 kWh/kWp/año (PVOUT Colombia — World Bank)  ·  "
+        f"🐄 **Ganado:** {_DEFAULT_UGG_AGRO} UGG/ha ≈ 6 vacas/ha bajo paneles (ingreso ganadero neto ~3.6 M COP/ha/año)  ·  "
+        f"📊 **PPA base:** {_DEFAULT_PRECIO_ENERGIA} COP/kWh  ·  "
+        f"📉 **Degradacion:** 0.5%/año  ·  "
+        f"⏳ **Vida util:** 25 años"
+    )
+
     # ── Parametros compartidos ────────────────────────────────────────────────
     st.markdown("### Parametros compartidos")
     pc1, pc2, pc3, pc4 = st.columns(4)
-    ppa    = pc1.slider("PPA inicial (COP/kWh)", 100, 400, 160, 5,
-                         help="Precio al que se vende cada kWh en el año 1. Con escalacion, sube cada año.")
+    ppa    = pc1.slider("PPA inicial (COP/kWh)", 100, 400, 200, 5,
+                         help="Precio al que se vende cada kWh en el año 1. Con escalacion, sube cada año. "
+                              "200 COP/kWh = default compartido con pestañas Beneficio y Viabilidad Financiera.")
     wacc   = pc2.slider("WACC — tasa descuento (%)", 5, 20, 8, 1,
                          help="Costo de oportunidad del capital propio invertido.") / 100
     n_años = pc3.slider("Vida util del proyecto (años)", 10, 35, 25, 1)
