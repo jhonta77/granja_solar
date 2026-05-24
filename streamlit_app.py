@@ -2179,17 +2179,37 @@ def _dcf_params(
     wacc: float,
     n: int,
     ppa_escal: float = 0.0,
+    inflacion: float = 0.0,
+    valor_residual_cop: float = 0.0,
 ) -> dict:
-    """DCF año por año.
-    - La parte solar degrada al 0.5%/año Y escala con ppa_escal (%/año).
-    - El ingreso ganadero y el OPEX son constantes (precios reales).
-    - ppa_escal: tasa anual de escalacion del PPA (ej. 0.053 = 5.3%).
+    """DCF nominal año por año.
+
+    Inflacion general (inflacion): sube el ingreso ganadero/otros Y el OPEX cada año.
+    Escalacion PPA (ppa_escal): sube adicionalmente el precio de venta de la energia.
+    El ingreso solar combina ambas: crece con (1+ppa_escal)*(1+inflacion) y cae con degradacion.
+    Valor residual (valor_residual_cop): COP de HOY — se ajusta a precios nominales del año N
+      multiplicando por (1+inflacion)^n y se descuenta al WACC.
     """
     flujos = []
     for t in range(1, n + 1):
-        # Degradacion reduce la generacion; escalacion sube el precio del kWh
-        solar_t = ingreso_solar_yr1 * (1 - degradacion) ** (t - 1) * (1 + ppa_escal) ** (t - 1)
-        fcf_t   = solar_t + otros_ingresos_yr1 - opex_yr1
+        # Solar: precio sube con inflacion + escalacion PPA; generacion baja por degradacion
+        factor_precio = (1 + ppa_escal) ** (t - 1) * (1 + inflacion) ** (t - 1)
+        factor_gen    = (1 - degradacion) ** (t - 1)
+        solar_t  = ingreso_solar_yr1 * factor_precio * factor_gen
+
+        # Ganado / otros ingresos no-solar: crecen con inflacion general (precio animales sube)
+        otros_t  = otros_ingresos_yr1 * (1 + inflacion) ** (t - 1)
+
+        # OPEX: mano de obra, repuestos e insumos tambien suben con inflacion
+        opex_t   = opex_yr1 * (1 + inflacion) ** (t - 1)
+
+        fcf_t    = solar_t + otros_t - opex_t
+
+        # Valor residual: en el ultimo año se recupera el valor nominal del terreno/activos
+        if t == n:
+            valor_residual_nominal = valor_residual_cop * (1 + inflacion) ** n
+            fcf_t += valor_residual_nominal
+
         flujos.append(fcf_t)
 
     vpn = -capex_cop_ha + sum(f / (1 + wacc) ** t for t, f in enumerate(flujos, 1))
@@ -2245,11 +2265,14 @@ def _ppa_breakeven(
     wacc: float,
     n: int,
     ppa_escal: float = 0.0,
+    inflacion: float = 0.0,
+    valor_residual_cop: float = 0.0,
 ) -> float | None:
     """PPA inicial (COP/kWh) en que VPN = 0. Devuelve None si no converge."""
     def _vpn(ppa: float) -> float:
-        solar_yr1 = kw_ha * yield_kwh_kwp * ppa  # COP/ha/año
-        dcf = _dcf_params(capex_cop_ha, solar_yr1, otros_ingresos, opex_fijo, degradacion, wacc, n, ppa_escal)
+        solar_yr1 = kw_ha * yield_kwh_kwp * ppa
+        dcf = _dcf_params(capex_cop_ha, solar_yr1, otros_ingresos, opex_fijo,
+                          degradacion, wacc, n, ppa_escal, inflacion, valor_residual_cop)
         return dcf["vpn"]
 
     if _vpn(10) > 0:   # incluso a PPA=10 es rentable
@@ -2339,6 +2362,9 @@ def _chart_vpn_vs_ppa(
     degradacion: float, wacc: float, n: int,
     ppa_actual: float,
     ppa_escal: float = 0.0,
+    inflacion: float = 0.0,
+    vr_a: float = 0.0,
+    vr_b: float = 0.0,
 ) -> object:
     """Curva VPN vs PPA inicial para ambos escenarios."""
     import plotly.graph_objects as go
@@ -2346,8 +2372,10 @@ def _chart_vpn_vs_ppa(
     ppas = list(range(100, 401, 5))
     vpns_a, vpns_b = [], []
     for p in ppas:
-        da = _dcf_params(capex_a, kw_a * yield_a * p, otros_a, opex_a, degradacion, wacc, n, ppa_escal)
-        db = _dcf_params(capex_b, kw_b * yield_b * p, otros_b, opex_b, degradacion, wacc, n, ppa_escal)
+        da = _dcf_params(capex_a, kw_a * yield_a * p, otros_a, opex_a,
+                         degradacion, wacc, n, ppa_escal, inflacion, vr_a)
+        db = _dcf_params(capex_b, kw_b * yield_b * p, otros_b, opex_b,
+                         degradacion, wacc, n, ppa_escal, inflacion, vr_b)
         vpns_a.append(da["vpn"] / 1e6)
         vpns_b.append(db["vpn"] / 1e6)
 
@@ -2421,26 +2449,51 @@ def render_comparativo_tab() -> None:
     trm    = pc4.slider("TRM (COP/USD)", 3_500, 6_000, 4_000, 50,
                          help="Tasa Representativa del Mercado. Afecta el CAPEX ya que los paneles son importados.")
 
-    pc5, pc6 = st.columns([2, 4])
-    ppa_escal = pc5.slider(
-        "Escalacion anual del PPA (%/año)", 0.0, 10.0, 0.0, 0.1,
+    st.markdown("**Inflacion y valor residual**")
+    pi1, pi2, pi3 = st.columns(3)
+    inflacion = pi1.slider(
+        "Inflacion general (%/año)", 0.0, 12.0, 5.3, 0.1,
         help=(
-            "Tasa a la que sube el precio de venta de la energia cada año. "
-            "0% = precio fijo (modelo en precios constantes). "
-            "5.3% = indexado a la inflacion promedio de Colombia (2021-2024). "
-            "Ejemplo: PPA año 5 = 160 × (1.053)⁴ = 196 COP/kWh."
+            "Tasa anual que sube TODO al mismo tiempo: el precio de la energia (PPA), "
+            "el ingreso ganadero y el OPEX. "
+            "5.3% = promedio Colombia 2021-2024 (Banrep). "
+            "0% = modelo en precios constantes (sin inflacion)."
+        ),
+        key="inflacion_slider",
+    ) / 100
+    ppa_escal = pi2.slider(
+        "Escalacion EXTRA del PPA (%/año)", 0.0, 5.0, 0.0, 0.1,
+        help=(
+            "Aumento adicional del PPA por encima de la inflacion general. "
+            "Ejemplo: si la inflacion es 5.3% y el contrato PPA sube 6%, "
+            "la escalacion extra es 0.7%. Normalmente 0 si el PPA ya esta indexado a inflacion."
         ),
         key="ppa_escal_slider",
     ) / 100
-    pc6.info(
-        f"Con escalacion **{ppa_escal*100:.1f}%/año**: "
-        f"PPA año 5 = **{ppa*(1+ppa_escal)**4:.0f}** COP/kWh · "
-        f"año 10 = **{ppa*(1+ppa_escal)**9:.0f}** COP/kWh · "
-        f"año 25 = **{ppa*(1+ppa_escal)**24:.0f}** COP/kWh"
-        if ppa_escal > 0 else
-        "Escalacion en **0%** — modelo en precios constantes (reales). "
-        "Sube el slider para simular que el PPA crece con la inflacion cada año."
+    pi3.info(
+        f"**Año 1:** {ppa:.0f} COP/kWh  \n"
+        f"**Año 10:** {ppa*(1+inflacion+ppa_escal)**9:.0f} COP/kWh  \n"
+        f"**Año 25:** {ppa*(1+inflacion+ppa_escal)**24:.0f} COP/kWh"
     )
+
+    pv1, pv2 = st.columns(2)
+    vr_a_m = pv1.number_input(
+        "Valor residual terreno A (M COP/ha, precios hoy)", 0.0, 50.0, 5.0, 0.5,
+        key="vr_a",
+        help=(
+            "Valor del terreno en pesos de HOY. El modelo lo lleva a precios del año N "
+            "multiplicando por (1+inflacion)^N. Valor tipico Colombia rural: 3-10 M COP/ha. "
+            "Se suma al flujo de caja del ultimo año del proyecto."
+        ),
+    )
+    vr_b_m = pv2.number_input(
+        "Valor residual terreno B (M COP/ha, precios hoy)", 0.0, 50.0, 5.0, 0.5,
+        key="vr_b",
+        help="Mismo terreno; el solar denso no agrega valor ganadero pero la tierra sigue valorizandose.",
+    )
+    vr_a = vr_a_m * 1e6   # COP
+    vr_b = vr_b_m * 1e6
+
     degradacion = 0.005   # 0.5%/año, fijo
 
     st.divider()
@@ -2496,7 +2549,8 @@ def render_comparativo_tab() -> None:
     opex_a          = capex_cop_a * opex_pct_a + opex_agro_m * 1e6  # COP/ha/año
     fcf_yr1_a       = solar_yr1_a + ganado_cop_a - opex_a
 
-    dcf_a = _dcf_params(capex_cop_a, solar_yr1_a, ganado_cop_a, opex_a, degradacion, wacc, n_años, ppa_escal)
+    dcf_a = _dcf_params(capex_cop_a, solar_yr1_a, ganado_cop_a, opex_a,
+                        degradacion, wacc, n_años, ppa_escal, inflacion, vr_a)
 
     # Escenario B
     capex_cop_b     = kw_ha_b * capex_usd_b * trm               # COP/ha
@@ -2505,11 +2559,14 @@ def render_comparativo_tab() -> None:
     opex_b          = capex_cop_b * opex_pct_b + mant_m * 1e6   # COP/ha/año
     fcf_yr1_b       = solar_yr1_b - opex_b
 
-    dcf_b = _dcf_params(capex_cop_b, solar_yr1_b, otros_b, opex_b, degradacion, wacc, n_años, ppa_escal)
+    dcf_b = _dcf_params(capex_cop_b, solar_yr1_b, otros_b, opex_b,
+                        degradacion, wacc, n_años, ppa_escal, inflacion, vr_b)
 
-    # Puntos de equilibrio PPA (con la misma escalacion activa)
-    be_a = _ppa_breakeven(capex_cop_a, kw_ha_a, yield_kwh_a, ganado_cop_a, opex_a, degradacion, wacc, n_años, ppa_escal)
-    be_b = _ppa_breakeven(capex_cop_b, kw_ha_b, yield_kwh_b, otros_b, opex_b, degradacion, wacc, n_años, ppa_escal)
+    # Puntos de equilibrio PPA
+    be_a = _ppa_breakeven(capex_cop_a, kw_ha_a, yield_kwh_a, ganado_cop_a, opex_a,
+                          degradacion, wacc, n_años, ppa_escal, inflacion, vr_a)
+    be_b = _ppa_breakeven(capex_cop_b, kw_ha_b, yield_kwh_b, otros_b, opex_b,
+                          degradacion, wacc, n_años, ppa_escal, inflacion, vr_b)
 
     # ── Metricas lado a lado ───────────────────────────────────────────────────
     st.markdown("### Resultados financieros (por hectarea)")
@@ -2606,27 +2663,40 @@ def render_comparativo_tab() -> None:
     fig_sens = _chart_vpn_vs_ppa(
         capex_cop_a, kw_ha_a, yield_kwh_a, ganado_cop_a, opex_a,
         capex_cop_b, kw_ha_b, yield_kwh_b, otros_b, opex_b,
-        degradacion, wacc, n_años, ppa, ppa_escal,
+        degradacion, wacc, n_años, ppa, ppa_escal, inflacion, vr_a, vr_b,
     )
     st.plotly_chart(fig_sens, use_container_width=True)
 
     # ── Tabla de flujos detallada ─────────────────────────────────────────────
     st.divider()
-    with st.expander("📋 Ver tabla detallada de flujos año por año", expanded=False):
+    with st.expander("📋 Ver tabla detallada de flujos año por año (valores nominales)", expanded=False):
+        st.caption(
+            "Todos los valores en precios NOMINALES del año correspondiente "
+            f"(inflacion {inflacion*100:.1f}%/año aplicada). "
+            "El ultimo año incluye el valor residual del terreno en precios del año N."
+        )
         filas_det = []
         for t in range(1, n_años + 1):
             fa_t = dcf_a["flujos"][t - 1]
             fb_t = dcf_b["flujos"][t - 1]
-            solar_a_t = solar_yr1_a * (1 - degradacion) ** (t - 1)
-            solar_b_t = solar_yr1_b * (1 - degradacion) ** (t - 1)
+            inf_t   = (1 + inflacion) ** (t - 1)
+            escal_t = (1 + ppa_escal) ** (t - 1)
+            deg_t   = (1 - degradacion) ** (t - 1)
+            solar_a_t  = solar_yr1_a * inf_t * escal_t * deg_t
+            ganado_t   = ganado_cop_a * inf_t
+            opex_a_t   = opex_a * inf_t
+            solar_b_t  = solar_yr1_b * inf_t * escal_t * deg_t
+            opex_b_t   = opex_b * inf_t
+            ppa_t      = ppa * (1 + inflacion + ppa_escal) ** (t - 1)
             filas_det.append({
                 "Año": t,
-                "A — Ingreso solar (M COP)": round(solar_a_t / 1e6, 2),
-                "A — Ingreso ganado (M COP)": round(ganado_cop_a / 1e6, 2),
-                "A — OPEX (M COP)": round(opex_a / 1e6, 2),
+                "PPA nominal (COP/kWh)": round(ppa_t, 1),
+                "A — Solar (M COP)": round(solar_a_t / 1e6, 2),
+                "A — Ganado (M COP)": round(ganado_t / 1e6, 2),
+                "A — OPEX (M COP)": round(opex_a_t / 1e6, 2),
                 "A — FCF (M COP)": round(fa_t / 1e6, 2),
-                "B — Ingreso solar (M COP)": round(solar_b_t / 1e6, 2),
-                "B — OPEX (M COP)": round(opex_b / 1e6, 2),
+                "B — Solar (M COP)": round(solar_b_t / 1e6, 2),
+                "B — OPEX (M COP)": round(opex_b_t / 1e6, 2),
                 "B — FCF (M COP)": round(fb_t / 1e6, 2),
             })
         st.dataframe(pd.DataFrame(filas_det), use_container_width=True, hide_index=True)
