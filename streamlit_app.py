@@ -2166,6 +2166,455 @@ def _chart_viab_vs_rent(df_r: pd.DataFrame) -> object:
     return fig
 
 
+# ---------------------------------------------------------------------------
+# Pestaña comparativo: Agrivoltaico vs Solar Denso (Gemini)
+# ---------------------------------------------------------------------------
+
+def _dcf_params(
+    capex_cop_ha: float,
+    ingreso_solar_yr1: float,
+    otros_ingresos_yr1: float,
+    opex_yr1: float,
+    degradacion: float,
+    wacc: float,
+    n: int,
+) -> dict:
+    """DCF año por año. La parte solar degrada; el resto (ganado, OPEX fijo) es constante."""
+    flujos = []
+    for t in range(1, n + 1):
+        solar_t = ingreso_solar_yr1 * (1 - degradacion) ** (t - 1)
+        fcf_t   = solar_t + otros_ingresos_yr1 - opex_yr1
+        flujos.append(fcf_t)
+
+    vpn = -capex_cop_ha + sum(f / (1 + wacc) ** t for t, f in enumerate(flujos, 1))
+
+    # TIR por biseccion
+    def _npv_r(r: float) -> float:
+        return -capex_cop_ha + sum(f / (1 + r) ** t for t, f in enumerate(flujos, 1))
+
+    tir = float("nan")
+    if _npv_r(0.001) > 0:
+        lo, hi = 0.001, 10.0
+        for _ in range(80):
+            mid = (lo + hi) / 2.0
+            if _npv_r(mid) > 0:
+                lo = mid
+            else:
+                hi = mid
+        tir = (lo + hi) / 2.0
+
+    # Payback simple (sin descontar)
+    acum = -capex_cop_ha
+    payback = None
+    for t, f in enumerate(flujos, 1):
+        acum += f
+        if acum >= 0 and payback is None:
+            payback = t
+
+    # Payback descontado
+    acum_d = -capex_cop_ha
+    payback_d = None
+    for t, f in enumerate(flujos, 1):
+        acum_d += f / (1 + wacc) ** t
+        if acum_d >= 0 and payback_d is None:
+            payback_d = t
+
+    return {
+        "vpn": vpn, "tir": tir,
+        "payback": payback, "payback_d": payback_d,
+        "flujos": flujos, "capex": capex_cop_ha, "n": n,
+        "ingreso_solar_yr1": ingreso_solar_yr1,
+        "otros_ingresos_yr1": otros_ingresos_yr1,
+        "opex_yr1": opex_yr1,
+    }
+
+
+def _ppa_breakeven(
+    capex_cop_ha: float,
+    kw_ha: float,
+    yield_kwh_kwp: float,
+    otros_ingresos: float,
+    opex_fijo: float,
+    degradacion: float,
+    wacc: float,
+    n: int,
+) -> float | None:
+    """PPA (COP/kWh) en que VPN = 0. Devuelve None si no converge."""
+    def _vpn(ppa: float) -> float:
+        solar_yr1 = kw_ha * yield_kwh_kwp * ppa  # COP/ha/año
+        dcf = _dcf_params(capex_cop_ha, solar_yr1, otros_ingresos, opex_fijo, degradacion, wacc, n)
+        return dcf["vpn"]
+
+    if _vpn(10) > 0:   # incluso a PPA=10 es rentable
+        return 10.0
+    if _vpn(1_000) < 0:  # incluso a PPA=1000 no es rentable
+        return None
+
+    lo, hi = 10.0, 1_000.0
+    for _ in range(80):
+        mid = (lo + hi) / 2.0
+        if _vpn(mid) < 0:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2.0
+
+
+def _chart_flujos_comparativo(dcf_a: dict, dcf_b: dict, wacc: float) -> object:
+    """Grafica flujos de caja anuales de ambos escenarios + linea acumulada descontada."""
+    import plotly.graph_objects as go
+
+    n = max(dcf_a["n"], dcf_b["n"])
+    años = list(range(1, n + 1))
+
+    fa = dcf_a["flujos"]
+    fb = dcf_b["flujos"]
+
+    acum_a, acum_b = [-dcf_a["capex"]], [-dcf_b["capex"]]
+    for t in range(1, n + 1):
+        acum_a.append(acum_a[-1] + fa[t - 1] / (1 + wacc) ** t)
+        acum_b.append(acum_b[-1] + fb[t - 1] / (1 + wacc) ** t)
+
+    fig = go.Figure()
+
+    # Barras agrivoltaico
+    fig.add_trace(go.Bar(
+        x=años, y=[v / 1e6 for v in fa],
+        name="Agrivoltaico (A) — FCF anual",
+        marker_color="#2563EB", opacity=0.75,
+        hovertemplate="Año %{x}<br>Agrivoltaico: %{y:.2f} M COP/ha<extra></extra>",
+    ))
+    # Barras solar denso
+    fig.add_trace(go.Bar(
+        x=años, y=[v / 1e6 for v in fb],
+        name="Solar Denso (B) — FCF anual",
+        marker_color="#D97706", opacity=0.75,
+        hovertemplate="Año %{x}<br>Solar Denso: %{y:.2f} M COP/ha<extra></extra>",
+    ))
+    # Acumulado VPN agrivoltaico
+    fig.add_trace(go.Scatter(
+        x=[0] + años, y=[v / 1e6 for v in acum_a],
+        name="VPN acum. Agrivoltaico (A)",
+        mode="lines", line=dict(color="#1D4ED8", width=2.5, dash="solid"),
+        hovertemplate="Año %{x}<br>VPN acum: %{y:.2f} M COP<extra></extra>",
+    ))
+    # Acumulado VPN solar denso
+    fig.add_trace(go.Scatter(
+        x=[0] + años, y=[v / 1e6 for v in acum_b],
+        name="VPN acum. Solar Denso (B)",
+        mode="lines", line=dict(color="#B45309", width=2.5, dash="dash"),
+        hovertemplate="Año %{x}<br>VPN acum: %{y:.2f} M COP<extra></extra>",
+    ))
+    # Linea cero
+    fig.add_hline(y=0, line_color="#6B7280", line_width=1, line_dash="dot")
+
+    fig.update_layout(
+        title=dict(
+            text="Flujo de caja anual y VPN acumulado — Agrivoltaico vs Solar Denso (por hectarea)",
+            font=dict(size=14, color="#111827", family="Arial"), x=0.5,
+        ),
+        barmode="group",
+        xaxis=dict(title="Año", tickfont=dict(size=11, color="#374151")),
+        yaxis=dict(title="M COP / ha", tickformat=",.1f", gridcolor="#E5E7EB"),
+        plot_bgcolor="white", paper_bgcolor="white",
+        height=440,
+        legend=dict(orientation="h", y=-0.22, x=0.5, xanchor="center",
+                    font=dict(size=11, color="#111827")),
+        margin=dict(l=10, r=10, t=55, b=120),
+    )
+    _apply_readable_fonts(fig)
+    return fig
+
+
+def _chart_vpn_vs_ppa(
+    capex_a: float, kw_a: float, yield_a: float, otros_a: float, opex_a: float,
+    capex_b: float, kw_b: float, yield_b: float, otros_b: float, opex_b: float,
+    degradacion: float, wacc: float, n: int,
+    ppa_actual: float,
+) -> object:
+    """Curva VPN vs PPA para ambos escenarios. Muestra punto de cruce con cero."""
+    import plotly.graph_objects as go
+
+    ppas = list(range(100, 401, 5))
+    vpns_a, vpns_b = [], []
+    for p in ppas:
+        da = _dcf_params(capex_a, kw_a * yield_a * p, otros_a, opex_a, degradacion, wacc, n)
+        db = _dcf_params(capex_b, kw_b * yield_b * p, otros_b, opex_b, degradacion, wacc, n)
+        vpns_a.append(da["vpn"] / 1e6)
+        vpns_b.append(db["vpn"] / 1e6)
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=ppas, y=vpns_a, name="Agrivoltaico (A)",
+        mode="lines", line=dict(color="#2563EB", width=3),
+        hovertemplate="PPA=%{x} COP/kWh<br>VPN=%{y:.1f} M COP/ha<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=ppas, y=vpns_b, name="Solar Denso (B)",
+        mode="lines", line=dict(color="#D97706", width=3, dash="dash"),
+        hovertemplate="PPA=%{x} COP/kWh<br>VPN=%{y:.1f} M COP/ha<extra></extra>",
+    ))
+    # Lineas de referencia
+    fig.add_hline(y=0, line_color="#6B7280", line_width=1.5, line_dash="dot",
+                  annotation_text="VPN = 0 (punto de equilibrio)", annotation_position="top right",
+                  annotation_font=dict(size=11, color="#6B7280"))
+    fig.add_vline(x=ppa_actual, line_color="#DC2626", line_width=1.5, line_dash="dash",
+                  annotation_text=f"PPA actual: {ppa_actual:.0f}", annotation_position="top left",
+                  annotation_font=dict(size=11, color="#DC2626"))
+    # Zona mercado colombiano
+    fig.add_vrect(x0=180, x1=260, fillcolor="#D1FAE5", opacity=0.25, layer="below",
+                  line_width=0, annotation_text="Rango PPA mercado (180-260)", annotation_position="top left",
+                  annotation_font=dict(size=10, color="#065F46"))
+
+    fig.update_layout(
+        title=dict(
+            text="Sensibilidad del VPN al precio de la energia (PPA)",
+            font=dict(size=14, color="#111827", family="Arial"), x=0.5,
+        ),
+        xaxis=dict(title="PPA (COP/kWh)", tickfont=dict(size=11, color="#374151"), gridcolor="#E5E7EB"),
+        yaxis=dict(title="VPN (M COP / ha)", tickformat=",.0f", gridcolor="#E5E7EB"),
+        plot_bgcolor="white", paper_bgcolor="white",
+        height=400,
+        legend=dict(orientation="h", y=-0.18, x=0.5, xanchor="center",
+                    font=dict(size=11, color="#111827")),
+        margin=dict(l=10, r=10, t=55, b=90),
+    )
+    _apply_readable_fonts(fig)
+    return fig
+
+
+def render_comparativo_tab() -> None:
+    """Comparativo financiero: Agrivoltaico (NREL/IRENA) vs Solar Denso (parametros Gemini)."""
+    import plotly.graph_objects as go
+
+    st.subheader("⚡ Comparativo: Agrivoltaico vs Parque Solar Denso")
+    st.markdown(
+        "Simula lado a lado dos modelos de negocio distintos sobre la **misma hectarea plana** "
+        "en Colombia. Ajusta los parametros con los sliders y observa como cambia la rentabilidad."
+    )
+
+    st.info(
+        "**Escenario A — Agrivoltaico** (base del proyecto): paneles espaciados para permitir "
+        "ganaderia bajo ellos. Menos kW/ha, menor CAPEX, ingreso doble (solar + ganado).  \n"
+        "**Escenario B — Solar Denso** (parametros Gemini): maximo de paneles por hectarea, "
+        "sin uso agropecuario. Mayor potencia instalada, CAPEX ~4× mas alto, solo ingreso solar."
+    )
+
+    st.divider()
+
+    # ── Parametros compartidos ────────────────────────────────────────────────
+    st.markdown("### Parametros compartidos")
+    pc1, pc2, pc3, pc4 = st.columns(4)
+    ppa   = pc1.slider("PPA — precio energia (COP/kWh)", 100, 400, 160, 5,
+                        help="Precio al que se vende cada kWh a la red o al cliente final.")
+    wacc  = pc2.slider("WACC — tasa descuento (%)", 5, 20, 8, 1,
+                        help="Costo de oportunidad del capital propio invertido.") / 100
+    n_años = pc3.slider("Vida util del proyecto (años)", 10, 35, 25, 1)
+    trm   = pc4.slider("TRM (COP/USD)", 3_500, 6_000, 4_000, 50,
+                        help="Tasa Representativa del Mercado. Afecta el CAPEX ya que los paneles son importados.")
+    degradacion = 0.005   # 0.5%/año, fijo
+
+    st.divider()
+
+    # ── Parametros por escenario ──────────────────────────────────────────────
+    st.markdown("### Parametros por escenario")
+    col_a, col_sep, col_b = st.columns([5, 1, 5])
+
+    with col_a:
+        st.markdown("#### 🌿 A — Agrivoltaico (NREL/IRENA)")
+        kw_ha_a     = st.number_input("Potencia instalada (kW/ha)", 100.0, 600.0, 312.8, 10.0,
+                                       key="kw_a", help="Base: 7.9 acres/MW segun NREL.")
+        capex_usd_a = st.number_input("CAPEX (USD/kW)", 300.0, 1_200.0, 599.0, 10.0,
+                                       key="capex_a", help="IRENA 2025 proyeccion Colombia.")
+        yield_kwh_a = st.number_input("Rendimiento (kWh/kWp/año)", 800.0, 2_500.0, 1_478.0, 10.0,
+                                       key="yield_a", help="PVOUT promedio Colombia — World Bank/ESMAP.")
+        ganado_m    = st.number_input("Ingreso ganadero (M COP/ha/año)", 0.0, 30.0, 8.5, 0.5,
+                                       key="ganado_a",
+                                       help="0.8 UA/ha × precio novillo. Solo Escenario A.")
+        opex_pct_a  = st.number_input("OPEX solar (% CAPEX/año)", 0.5, 5.0, 1.5, 0.1,
+                                       key="opex_a") / 100
+        opex_agro_m = st.number_input("OPEX ganadero (M COP/ha/año)", 0.0, 10.0, 3.0, 0.5,
+                                       key="opex_agro")
+
+    with col_sep:
+        st.markdown(" ")
+
+    with col_b:
+        st.markdown("#### ☀️ B — Solar Denso (Gemini)")
+        kw_ha_b     = st.number_input("Potencia instalada (kW/ha)", 300.0, 1_500.0, 950.0, 10.0,
+                                       key="kw_b",
+                                       help="Gemini: 1,350 paneles × 700W = 945 kWp ~ 950 kWp/ha.")
+        capex_usd_b = st.number_input("CAPEX (USD/kW)", 300.0, 1_500.0, 800.0, 10.0,
+                                       key="capex_b",
+                                       help="Gemini: $0.75-0.85/W. Usamos el punto medio $0.80/W.")
+        yield_kwh_b = st.number_input("Rendimiento (kWh/kWp/año)", 800.0, 2_500.0, 1_420.0, 10.0,
+                                       key="yield_b",
+                                       help="Ligeramente menor que A por mayor GCR (~0.60): sombras entre filas reducen ~3-4% el rendimiento por panel.")
+        opex_pct_b  = st.number_input("OPEX solar (% CAPEX/año)", 0.5, 5.0, 1.5, 0.1,
+                                       key="opex_b") / 100
+        mant_m      = st.number_input("Mantenimiento suelo (M COP/ha/año)", 0.0, 5.0, 1.0, 0.5,
+                                       key="mant_b",
+                                       help="Corte de pasto, limpieza entre estructuras. Sin ganaderia.")
+
+    st.divider()
+
+    # ── Calculos ──────────────────────────────────────────────────────────────
+    # Escenario A
+    capex_cop_a     = kw_ha_a * capex_usd_a * trm               # COP/ha
+    solar_yr1_a     = kw_ha_a * yield_kwh_a * ppa               # COP/ha/año
+    ganado_cop_a    = ganado_m * 1e6                             # COP/ha/año
+    opex_a          = capex_cop_a * opex_pct_a + opex_agro_m * 1e6  # COP/ha/año
+    fcf_yr1_a       = solar_yr1_a + ganado_cop_a - opex_a
+
+    dcf_a = _dcf_params(capex_cop_a, solar_yr1_a, ganado_cop_a, opex_a, degradacion, wacc, n_años)
+
+    # Escenario B
+    capex_cop_b     = kw_ha_b * capex_usd_b * trm               # COP/ha
+    solar_yr1_b     = kw_ha_b * yield_kwh_b * ppa               # COP/ha/año
+    otros_b         = 0.0                                        # sin ganado
+    opex_b          = capex_cop_b * opex_pct_b + mant_m * 1e6   # COP/ha/año
+    fcf_yr1_b       = solar_yr1_b - opex_b
+
+    dcf_b = _dcf_params(capex_cop_b, solar_yr1_b, otros_b, opex_b, degradacion, wacc, n_años)
+
+    # Puntos de equilibrio PPA
+    be_a = _ppa_breakeven(capex_cop_a, kw_ha_a, yield_kwh_a, ganado_cop_a, opex_a, degradacion, wacc, n_años)
+    be_b = _ppa_breakeven(capex_cop_b, kw_ha_b, yield_kwh_b, otros_b, opex_b, degradacion, wacc, n_años)
+
+    # ── Metricas lado a lado ───────────────────────────────────────────────────
+    st.markdown("### Resultados financieros (por hectarea)")
+
+    def _fmt_m(v: float) -> str:
+        return f"{v / 1e6:,.1f} M COP" if not (v != v) else "—"
+
+    def _fmt_tir(t) -> str:
+        if t != t or t is None:
+            return "❌ No converge"
+        return f"{t * 100:.1f}%"
+
+    def _fmt_pb(p) -> str:
+        return f"Año {p}" if p else "❌ No recupera"
+
+    kpi_rows = [
+        ("CAPEX total",           _fmt_m(capex_cop_a),                       _fmt_m(capex_cop_b)),
+        ("CAPEX (USD/ha)",        f"USD {kw_ha_a * capex_usd_a:,.0f}",       f"USD {kw_ha_b * capex_usd_b:,.0f}"),
+        ("Potencia instalada",    f"{kw_ha_a:.1f} kW/ha",                    f"{kw_ha_b:.1f} kW/ha"),
+        ("Generacion año 1",      f"{kw_ha_a * yield_kwh_a / 1e3:,.0f} MWh/ha", f"{kw_ha_b * yield_kwh_b / 1e3:,.0f} MWh/ha"),
+        ("Ingreso solar año 1",   _fmt_m(solar_yr1_a),                       _fmt_m(solar_yr1_b)),
+        ("Ingreso ganado año 1",  _fmt_m(ganado_cop_a),                      "— (sin ganado)"),
+        ("OPEX total año 1",      _fmt_m(opex_a),                            _fmt_m(opex_b)),
+        ("FCF neto año 1",        _fmt_m(fcf_yr1_a),                        _fmt_m(fcf_yr1_b)),
+        ("VPN (WACC={:.0%})".format(wacc), _fmt_m(dcf_a["vpn"]),            _fmt_m(dcf_b["vpn"])),
+        ("TIR",                   _fmt_tir(dcf_a["tir"]),                    _fmt_tir(dcf_b["tir"])),
+        ("Payback simple",        _fmt_pb(dcf_a["payback"]),                 _fmt_pb(dcf_b["payback"])),
+        ("Payback descontado",    _fmt_pb(dcf_a["payback_d"]),               _fmt_pb(dcf_b["payback_d"])),
+        ("PPA de equilibrio",
+         f"{be_a:.0f} COP/kWh" if be_a else "❌ >400",
+         f"{be_b:.0f} COP/kWh" if be_b else "❌ >400"),
+    ]
+
+    df_kpi = pd.DataFrame(kpi_rows, columns=["Indicador", "🌿 A — Agrivoltaico", "☀️ B — Solar Denso"])
+
+    # Color condicional via styler
+    def _color_row(row):
+        ind = row["Indicador"]
+        styles = ["", "", ""]
+        if "VPN" in ind:
+            va = row["🌿 A — Agrivoltaico"]
+            vb = row["☀️ B — Solar Denso"]
+            def _is_pos(s):
+                try: return float(s.split(" ")[0].replace(",","")) > 0
+                except: return False
+            styles[1] = "color: #16A34A; font-weight: bold" if _is_pos(va) else "color: #DC2626; font-weight: bold"
+            styles[2] = "color: #16A34A; font-weight: bold" if _is_pos(vb) else "color: #DC2626; font-weight: bold"
+        return styles
+
+    st.dataframe(
+        df_kpi.style.apply(_color_row, axis=1),
+        use_container_width=True, hide_index=True,
+    )
+
+    # ── Semaforo de veredicto ─────────────────────────────────────────────────
+    st.divider()
+    v1, v2 = st.columns(2)
+    with v1:
+        if dcf_a["vpn"] > 0:
+            st.success(f"✅ **Agrivoltaico (A)** — VPN positivo: {dcf_a['vpn']/1e6:,.1f} M COP/ha  \n"
+                       f"Recupera inversion en el **{_fmt_pb(dcf_a['payback'])}**  \n"
+                       f"PPA de equilibrio: **{be_a:.0f} COP/kWh**")
+        else:
+            st.error(f"❌ **Agrivoltaico (A)** — VPN negativo: {dcf_a['vpn']/1e6:,.1f} M COP/ha  \n"
+                     f"Se necesita PPA ≥ **{be_a:.0f} COP/kWh** para ser rentable")
+    with v2:
+        if dcf_b["vpn"] > 0:
+            st.success(f"✅ **Solar Denso (B)** — VPN positivo: {dcf_b['vpn']/1e6:,.1f} M COP/ha  \n"
+                       f"Recupera inversion en el **{_fmt_pb(dcf_b['payback'])}**  \n"
+                       f"PPA de equilibrio: **{be_b:.0f} COP/kWh**")
+        else:
+            st.error(f"❌ **Solar Denso (B)** — VPN negativo: {dcf_b['vpn']/1e6:,.1f} M COP/ha  \n"
+                     f"Se necesita PPA ≥ **{be_b:.0f} COP/kWh** para ser rentable")
+
+    # ── Grafica flujos de caja ─────────────────────────────────────────────────
+    st.divider()
+    st.markdown("### Flujo de caja anual y VPN acumulado")
+    st.caption(
+        "Las **barras** muestran el FCF de cada año (ingresos − OPEX, sin amortizar CAPEX). "
+        "Las **lineas** acumulan el VPN descontado desde el año 0 (incluye CAPEX inicial). "
+        "Cuando la linea cruza el cero = payback descontado."
+    )
+    fig_flujos = _chart_flujos_comparativo(dcf_a, dcf_b, wacc)
+    st.plotly_chart(fig_flujos, use_container_width=True)
+
+    # ── Sensibilidad VPN vs PPA ────────────────────────────────────────────────
+    st.divider()
+    st.markdown("### Sensibilidad del VPN al precio de la energia")
+    st.caption(
+        "¿A que precio de venta (PPA) cada modelo deja de perder dinero? "
+        "La zona verde es el rango de mercado colombiano real (PPA 180–260 COP/kWh). "
+        "La linea roja vertical es el PPA seleccionado en el slider."
+    )
+    fig_sens = _chart_vpn_vs_ppa(
+        capex_cop_a, kw_ha_a, yield_kwh_a, ganado_cop_a, opex_a,
+        capex_cop_b, kw_ha_b, yield_kwh_b, otros_b, opex_b,
+        degradacion, wacc, n_años, ppa,
+    )
+    st.plotly_chart(fig_sens, use_container_width=True)
+
+    # ── Tabla de flujos detallada ─────────────────────────────────────────────
+    st.divider()
+    with st.expander("📋 Ver tabla detallada de flujos año por año", expanded=False):
+        filas_det = []
+        for t in range(1, n_años + 1):
+            fa_t = dcf_a["flujos"][t - 1]
+            fb_t = dcf_b["flujos"][t - 1]
+            solar_a_t = solar_yr1_a * (1 - degradacion) ** (t - 1)
+            solar_b_t = solar_yr1_b * (1 - degradacion) ** (t - 1)
+            filas_det.append({
+                "Año": t,
+                "A — Ingreso solar (M COP)": round(solar_a_t / 1e6, 2),
+                "A — Ingreso ganado (M COP)": round(ganado_cop_a / 1e6, 2),
+                "A — OPEX (M COP)": round(opex_a / 1e6, 2),
+                "A — FCF (M COP)": round(fa_t / 1e6, 2),
+                "B — Ingreso solar (M COP)": round(solar_b_t / 1e6, 2),
+                "B — OPEX (M COP)": round(opex_b / 1e6, 2),
+                "B — FCF (M COP)": round(fb_t / 1e6, 2),
+            })
+        st.dataframe(pd.DataFrame(filas_det), use_container_width=True, hide_index=True)
+
+    # ── Notas metodologicas ───────────────────────────────────────────────────
+    st.divider()
+    st.caption(
+        "**Metodologia:**  \n"
+        "• CAPEX en año 0 (inversion de una sola vez). OPEX = % del CAPEX por año (O&M solar + seguros).  \n"
+        "• Degradacion de paneles: 0.5%/año sobre el ingreso solar (el rendimiento del panel disminuye con el tiempo).  \n"
+        "• Ingreso ganadero: constante anual (no degrada).  \n"
+        "• Escenario B usa rendimiento 1,420 kWh/kWp/año (vs 1,478 A) por mayor GCR (sombras entre filas reducen ~4% el yield).  \n"
+        "• No se modela deuda ni apalancamiento (modelo equity puro).  \n"
+        "• Impuestos no incluidos (analisis pre-impuesto).  \n"
+        "• Fuentes: IRENA TEC 2024, NREL Land-Use PV, World Bank ESMAP Solar Atlas Colombia."
+    )
+
+
 def render_rentabilidad_tab(df_r: pd.DataFrame) -> None:
     import plotly.graph_objects as go
 
@@ -2830,12 +3279,13 @@ def main() -> None:
 
     df_rent = load_rentabilidad()
 
-    tab_ranking, tab_raw, tab_agro, tab_fin, tab_rent, tab_glosario = st.tabs([
+    tab_ranking, tab_raw, tab_agro, tab_fin, tab_rent, tab_comp, tab_glosario = st.tabs([
         "Ranking",
         "Variables crudas por dimension",
         "Beneficio Agrivoltaico",
         "Viabilidad Financiera",
         "💰 Rentabilidad",
+        "⚡ Solar vs Agrivoltaico",
         "📖 Glosario",
     ])
 
@@ -2859,6 +3309,9 @@ def main() -> None:
                 "No se encontro el archivo de rentabilidad. "
                 "Ejecuta primero: `python -m src.scoring.rentabilidad_municipal`"
             )
+
+    with tab_comp:
+        render_comparativo_tab()
 
     with tab_glosario:
         render_glosario_tab()
