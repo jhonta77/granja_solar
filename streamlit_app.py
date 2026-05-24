@@ -2787,99 +2787,146 @@ def render_rentabilidad_tab(df_r: pd.DataFrame) -> None:
     import plotly.graph_objects as go
 
     st.subheader("Ranking de municipios — rentabilidad estimada por hectarea")
+    st.caption(
+        "El **slider de PPA** controla todo: cambia el precio de venta de la energia y el ranking "
+        "completo se recalcula en tiempo real para los 1,100+ municipios."
+    )
 
-    n_positivos = (df_r["margen_estimado_cop_ha_year"] > 0).sum()
-    n_total     = len(df_r)
+    # ── PPA SLIDER AL TOPE — controla TODO el ranking ─────────────────────────
+    ppa_base = 160.0   # PPA con el que fue calculado el CSV original
 
-    # Advertencia prominente sobre la naturaleza del score
-    st.error(
-        f"⚠️ **Importante — como leer este ranking:** "
-        f"El score (0–1) es un **ranking relativo**, NO un indicador de si el proyecto gana dinero. "
-        f"Con el PPA actual de 160 COP/kWh, solo **{n_positivos} de {n_total} municipios** "
-        f"tienen margen positivo real. Los demas estan rankeados por cual **pierde menos**, "
-        f"no porque sean rentables. "
-        f"**✅ Verde = margen positivo (gana dinero) · ❌ Rojo = margen negativo (pierde dinero)**. "
-        f"Usa el slider de PPA mas abajo para ver como mejora la situacion con precios reales de mercado."
+    col_sl, col_ref = st.columns([3, 1])
+    ppa_slider = col_sl.slider(
+        "💲 PPA — precio de venta de energia (COP/kWh)",
+        min_value=100, max_value=350, value=200, step=5,
+        help=(
+            "160 COP/kWh = conservador (subastas CREG 2023).  "
+            "200–260 COP/kWh = rango real de PPAs bilaterales solares en Colombia 2024.  "
+            "Cada vez que lo mueves el ranking completo se recalcula."
+        ),
+        key="rent_ppa_slider",
+    )
+    col_ref.metric("PPA de referencia CSV", "160 COP/kWh", f"{'+' if ppa_slider >= 160 else ''}{ppa_slider - 160} vs base")
+
+    # ── Recalcular margenes para los 1,100+ municipios ───────────────────────
+    df_dyn = df_r.copy()
+    gen    = pd.to_numeric(df_dyn["generacion_kwh_ha_year"],       errors="coerce").fillna(0)
+    costos = pd.to_numeric(df_dyn["costo_total_estimado_cop_ha_year"], errors="coerce").fillna(0)
+
+    df_dyn["ingreso_energia_cop_ha_year"] = gen * ppa_slider
+    df_dyn["margen_estimado_cop_ha_year"] = gen * ppa_slider - costos
+    df_dyn["relacion_beneficio_costo_rentabilidad"] = (gen * ppa_slider) / costos.replace(0, float("nan"))
+
+    # Normalizar score 0–1 segun el nuevo margen (mayor margen = score mas alto)
+    m = df_dyn["margen_estimado_cop_ha_year"]
+    m_min, m_max = m.min(), m.max()
+    if m_max > m_min:
+        df_dyn["score_rentabilidad_ajustada"] = (m - m_min) / (m_max - m_min)
+    else:
+        df_dyn["score_rentabilidad_ajustada"] = 0.5
+
+    # Re-ordenar: municipio con mayor margen arriba
+    df_dyn = df_dyn.sort_values("margen_estimado_cop_ha_year", ascending=False).reset_index(drop=True)
+
+    n_positivos = int((df_dyn["margen_estimado_cop_ha_year"] > 0).sum())
+    n_total     = len(df_dyn)
+    n_pos_base  = int((df_r["margen_estimado_cop_ha_year"] > 0).sum())
+
+    # ── Banner de estado ───────────────────────────────────────────────────────
+    delta_muns = n_positivos - n_pos_base
+    if n_positivos == 0:
+        st.error(
+            f"❌ Con PPA = **{ppa_slider} COP/kWh** ningún municipio tiene margen positivo. "
+            f"Sube el PPA o revisa los costos de cada municipio."
+        )
+    elif n_positivos < 20:
+        st.warning(
+            f"⚠️ Con PPA = **{ppa_slider} COP/kWh**: solo **{n_positivos} de {n_total}** municipios "
+            f"son rentables ({n_positivos/n_total*100:.1f}%). "
+            f"Con el PPA base (160 COP/kWh) eran {n_pos_base}. "
+            f"Cambio: **{'+' if delta_muns >= 0 else ''}{delta_muns} municipios**."
+        )
+    else:
+        st.success(
+            f"✅ Con PPA = **{ppa_slider} COP/kWh**: **{n_positivos} de {n_total}** municipios "
+            f"son rentables ({n_positivos/n_total*100:.1f}%). "
+            f"Con el PPA base (160 COP/kWh) eran {n_pos_base}. "
+            f"Cambio: **+{delta_muns} municipios**."
+        )
+
+    st.caption(
+        "**✅ Verde = margen positivo** (el proyecto gana dinero a este PPA)  ·  "
+        "**❌ Rojo = margen negativo** (los costos superan los ingresos — proyecto no rentable).  "
+        "El ranking se ordena de mayor a menor margen real."
     )
 
     # ── Metricas resumen ──────────────────────────────────────────────────────
-    top1        = df_r.iloc[0]
-    med_margen  = df_r["margen_estimado_cop_ha_year"].median()
+    top1        = df_dyn.iloc[0]
+    med_margen  = float(df_dyn["margen_estimado_cop_ha_year"].median())
     top1_margen = float(top1["margen_estimado_cop_ha_year"])
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric(
-        "Mejor posicionado en el ranking",
-        top1["municipio"],
-        f"{'✅ Margen positivo' if top1_margen > 0 else '❌ Aun con margen negativo'}",
+        "Mejor municipio",
+        str(top1["municipio"]),
+        f"{'✅ ' + top1['departamento'] if top1_margen > 0 else '❌ Aun con margen negativo'}",
         delta_color="normal" if top1_margen > 0 else "inverse",
     )
     c2.metric(
-        "Municipios con margen POSITIVO",
+        "Municipios rentables",
         f"{n_positivos}",
-        f"de {n_total} totales ({n_positivos/n_total*100:.1f}%)",
+        f"de {n_total} ({n_positivos/n_total*100:.1f}%)",
         delta_color="normal" if n_positivos > 0 else "off",
-        help="Solo estos municipios realmente ganan dinero con PPA=160 COP/kWh.",
     )
     c3.metric(
         "Margen mediano nacional",
         f"{med_margen/1e6:.1f} M COP/ha/año",
-        delta="negativo — PPA insuficiente" if med_margen < 0 else "positivo",
+        delta="negativo" if med_margen < 0 else "positivo",
         delta_color="inverse" if med_margen < 0 else "normal",
-        help="La mitad de municipios pierde mas de este monto por hectarea al año con PPA=160.",
+        help="La mitad de municipios gana/pierde mas de este monto al año.",
     )
     c4.metric(
         "Mejor margen real",
-        f"{float(top1_margen)/1e6:.2f} M COP/ha/año",
-        help=f"Municipio: {top1['municipio']}. Es el unico con margen claramente positivo.",
+        f"{top1_margen/1e6:.2f} M COP/ha/año",
+        help=f"Municipio lider: {top1['municipio']} ({top1.get('departamento','—')}).",
     )
 
     st.divider()
 
-    # ── Top 10 ranking ────────────────────────────────────────────────────────
-    st.markdown("### Top 10 — ranking de posicionamiento relativo")
+    # ── Top 10 ranking (dinamico) ──────────────────────────────────────────────
+    st.markdown(f"### Top 10 — ranking con PPA = {ppa_slider} COP/kWh")
     st.caption(
-        "🟢 **Verde** = margen positivo (el proyecto gana dinero con PPA=160 COP/kWh).  "
-        "🔴 **Rojo** = margen negativo (los costos superan los ingresos — el proyecto necesita "
-        "un PPA mas alto para ser viable). El score es util para **comparar** municipios entre si, "
-        "no para afirmar que todos son rentables."
+        "🟢 **Verde** = margen positivo a este PPA.  "
+        "🔴 **Rojo** = margen negativo — el municipio pierde dinero aunque tenga buen recurso solar.  "
+        "Mueve el slider de PPA arriba para ver cuantos pasan a verde."
     )
-    top10 = df_r.head(10).reset_index(drop=True)
+    top10 = df_dyn.head(10).reset_index(drop=True)
     fig_top = _chart_rent_top10(top10)
     st.plotly_chart(fig_top, use_container_width=True)
 
     # Tabla resumen top 10
     cols_tabla = [
         "municipio", "departamento",
-        "score_rentabilidad_ajustada", "clasificacion_rentabilidad_ajustada",
+        "score_rentabilidad_ajustada",
         "margen_estimado_cop_ha_year", "ingreso_energia_cop_ha_year",
         "costo_total_estimado_cop_ha_year", "relacion_beneficio_costo_rentabilidad",
         "v_i_multidimensional",
     ]
     rename_map = {
-        "municipio":                           "Municipio",
-        "departamento":                        "Departamento",
-        "score_rentabilidad_ajustada":         "Score rent.",
-        "clasificacion_rentabilidad_ajustada": "Clasificacion",
-        "margen_estimado_cop_ha_year":         "Margen (COP/ha/año)",
-        "ingreso_energia_cop_ha_year":         "Ingreso energia (COP/ha/año)",
-        "costo_total_estimado_cop_ha_year":    "Costo total (COP/ha/año)",
-        "relacion_beneficio_costo_rentabilidad":"B/C",
-        "v_i_multidimensional":                "Score viabilidad",
+        "municipio":                              "Municipio",
+        "departamento":                           "Departamento",
+        "score_rentabilidad_ajustada":            "Score rent.",
+        "margen_estimado_cop_ha_year":            "Margen (COP/ha/año)",
+        "ingreso_energia_cop_ha_year":            "Ingreso energia (COP/ha/año)",
+        "costo_total_estimado_cop_ha_year":       "Costo total (COP/ha/año)",
+        "relacion_beneficio_costo_rentabilidad":  "B/C",
+        "v_i_multidimensional":                   "Score viabilidad",
     }
-    available_cols = [c for c in cols_tabla if c in df_r.columns]
-    tabla_top10 = (
-        top10[available_cols]
-        .rename(columns=rename_map)
-        .round(4)
-    )
-    # Columna explícita de rentabilidad real
+    available_cols = [c for c in cols_tabla if c in df_dyn.columns]
+    tabla_top10 = top10[available_cols].rename(columns=rename_map).round(4)
     tabla_top10.insert(
-        2,
-        "¿Rentable?",
-        top10["margen_estimado_cop_ha_year"]
-        .fillna(0)
-        .apply(lambda m: "✅ Sí" if m > 0 else "❌ No"),
+        2, "¿Rentable?",
+        top10["margen_estimado_cop_ha_year"].fillna(0).apply(lambda m: "✅ Sí" if m > 0 else "❌ No"),
     )
     st.dataframe(tabla_top10, use_container_width=True, hide_index=True)
 
@@ -2888,41 +2935,54 @@ def render_rentabilidad_tab(df_r: pd.DataFrame) -> None:
     # ── Desglose por municipio ────────────────────────────────────────────────
     st.markdown("### Desglose detallado por municipio")
 
-    mun_options = df_r["municipio"].tolist()
+    mun_options = df_dyn["municipio"].tolist()
     mun_sel = st.selectbox(
         "Selecciona un municipio para ver su desglose financiero",
         mun_options,
         index=0,
         key="rent_mun_sel",
     )
-    row_sel = df_r[df_r["municipio"] == mun_sel].iloc[0]
 
-    # Métricas del municipio seleccionado
-    ingreso    = float(row_sel.get("ingreso_energia_cop_ha_year", 0) or 0)
-    costo_tot  = float(row_sel.get("costo_total_estimado_cop_ha_year", 0) or 0)
-    margen     = float(row_sel.get("margen_estimado_cop_ha_year", 0) or 0)
-    bc_ratio   = float(row_sel.get("relacion_beneficio_costo_rentabilidad", 0) or 0)
-    score_rent = float(row_sel.get("score_rentabilidad_ajustada", 0) or 0)
-    clasif     = str(row_sel.get("clasificacion_rentabilidad_ajustada", "—"))
+    # Datos del municipio: costos del CSV original + ingreso recalculado con PPA slider
+    row_orig = df_r[df_r["municipio"] == mun_sel]
+    if row_orig.empty:
+        st.warning("Municipio sin datos.")
+        return
+    row_orig = row_orig.iloc[0].copy()
+    gen_mun  = float(pd.to_numeric(row_orig.get("generacion_kwh_ha_year", 0), errors="coerce") or 0)
+    costos_mun = float(pd.to_numeric(row_orig.get("costo_total_estimado_cop_ha_year", 0), errors="coerce") or 0)
+
+    # Crear row_sel con ingreso y margen recalculados al PPA actual
+    row_sel = row_orig.copy()
+    row_sel["ingreso_energia_cop_ha_year"] = gen_mun * ppa_slider
+    row_sel["margen_estimado_cop_ha_year"] = gen_mun * ppa_slider - costos_mun
+    row_sel["precio_venta_energia_cop_kwh"] = ppa_slider
+
+    ingreso    = float(row_sel["ingreso_energia_cop_ha_year"])
+    costo_tot  = costos_mun
+    margen     = float(row_sel["margen_estimado_cop_ha_year"])
+    bc_ratio   = ingreso / costo_tot if costo_tot > 0 else 0
+    score_rent = float(df_dyn[df_dyn["municipio"] == mun_sel]["score_rentabilidad_ajustada"].iloc[0]
+                       if not df_dyn[df_dyn["municipio"] == mun_sel].empty else 0)
 
     mc1, mc2, mc3, mc4 = st.columns(4)
-    mc1.metric("Ingreso energia", f"{ingreso:,.0f} COP/ha/año")
-    mc2.metric("Costo total",     f"{costo_tot:,.0f} COP/ha/año")
+    mc1.metric("Ingreso energia", f"{ingreso/1e6:.2f} M COP/ha/año",
+               help=f"{gen_mun:,.0f} kWh/ha × {ppa_slider} COP/kWh")
+    mc2.metric("Costo total (fijo)", f"{costo_tot/1e6:.2f} M COP/ha/año",
+               help="CAPEX anualizado + OPEX + interconexion + logistica + riesgo + oportunidad agro")
     mc3.metric(
         "Margen neto",
-        f"{margen:,.0f} COP/ha/año",
-        delta=f"{'positivo' if margen >= 0 else 'negativo'}",
+        f"{margen/1e6:.2f} M COP/ha/año",
+        delta="✅ positivo" if margen >= 0 else "❌ negativo",
         delta_color="normal" if margen >= 0 else "inverse",
     )
-    mc4.metric(
-        "Relacion B/C",
-        f"{bc_ratio:.2f}",
-        help="Ingreso / Costo total. >1 significa que genera mas de lo que cuesta.",
-    )
+    mc4.metric("Relacion B/C", f"{bc_ratio:.3f}",
+               help=">1 = ingreso supera costos. <1 = pierde dinero.")
 
     st.caption(
-        f"Score rentabilidad: **{score_rent:.4f}** · Clasificacion: **{clasif}** · "
-        f"Score viabilidad multidim: **{float(row_sel.get('v_i_multidimensional', 0) or 0):.4f}**"
+        f"Score rentabilidad (PPA={ppa_slider}): **{score_rent:.4f}**  ·  "
+        f"Score viabilidad multidim: **{float(row_orig.get('v_i_multidimensional', 0) or 0):.4f}**  ·  "
+        f"Generacion: **{gen_mun:,.0f} kWh/ha/año**"
     )
 
     col_wf, col_pie = st.columns([3, 2])
@@ -2930,37 +2990,35 @@ def render_rentabilidad_tab(df_r: pd.DataFrame) -> None:
         fig_wf = _chart_waterfall(row_sel)
         st.plotly_chart(fig_wf, use_container_width=True)
     with col_pie:
-        fig_pie = _chart_drivers_pie(row_sel)
+        fig_pie = _chart_drivers_pie(row_orig)   # costos del CSV original
         if fig_pie:
             st.plotly_chart(fig_pie, use_container_width=True)
 
-    # Tabla detallada de componentes
     with st.expander("Ver tabla completa de componentes de costo e ingreso"):
-        comp_rows = [{"Componente": "Ingreso energia", "COP/ha/año": ingreso, "Tipo": "Ingreso"}]
+        comp_rows = [{"Componente": f"Ingreso energia (PPA={ppa_slider})", "COP/ha/año": ingreso, "Tipo": "Ingreso"}]
         for col, (label, _) in _RENT_COST_LABELS.items():
-            val = float(row_sel.get(col, 0) or 0)
+            val = float(row_orig.get(col, 0) or 0)
             pct_col = _RENT_COST_PCT_COLUMNS[col]
-            pct = float(row_sel.get(pct_col, 0) or 0)
+            pct = float(row_orig.get(pct_col, 0) or 0)
             comp_rows.append({"Componente": label, "COP/ha/año": -val, "% del total costos": f"{pct:.1f}%", "Tipo": "Costo"})
         comp_rows.append({"Componente": "MARGEN NETO", "COP/ha/año": margen, "Tipo": "Total"})
         st.dataframe(pd.DataFrame(comp_rows).round(0), use_container_width=True, hide_index=True)
 
-    # Supuestos usados
     with st.expander("Supuestos del modelo de rentabilidad"):
         sup = {
-            "PPA (precio venta energia)": f"{float(row_sel.get('precio_venta_energia_cop_kwh', 160) or 160):,.0f} COP/kWh",
-            "TRM":                        f"{float(row_sel.get('supuesto_trm_cop_usd', 4000) or 4000):,.0f} COP/USD",
-            "WACC":                       f"{float(row_sel.get('supuesto_wacc', 0.08) or 0.08):.1%}",
-            "Vida util proyecto":         f"{int(row_sel.get('supuesto_vida_util_anios', 25) or 25)} años",
-            "Area proyecto (prorrateo)":  f"{float(row_sel.get('supuesto_area_proyecto_ha', 100) or 100):,.0f} ha",
-            "CAPEX":                      f"{float(row_sel.get('supuesto_capex_cop_ha', 0) or 0):,.0f} COP/ha",
-            "Capacidad instalada":        f"{float(row_sel.get('supuesto_capacidad_kw_ha', 0) or 0):,.1f} kW/ha",
+            "PPA aplicado (slider)":      f"{ppa_slider:,} COP/kWh",
+            "PPA original del CSV":       f"{int(ppa_base):,} COP/kWh",
+            "TRM":                        f"{float(row_orig.get('supuesto_trm_cop_usd', 4000) or 4000):,.0f} COP/USD",
+            "WACC":                       f"{float(row_orig.get('supuesto_wacc', 0.08) or 0.08):.1%}",
+            "Vida util proyecto":         f"{int(row_orig.get('supuesto_vida_util_anios', 25) or 25)} años",
+            "CAPEX":                      f"{float(row_orig.get('supuesto_capex_cop_ha', 0) or 0):,.0f} COP/ha",
+            "Capacidad instalada":        f"{float(row_orig.get('supuesto_capacidad_kw_ha', 0) or 0):,.1f} kW/ha",
+            "Generacion":                 f"{gen_mun:,.0f} kWh/ha/año",
         }
         st.table(pd.DataFrame(list(sup.items()), columns=["Supuesto", "Valor"]))
         st.caption(
-            "El ingreso se calcula como: generacion_kwh_ha_año × PPA. "
-            "El CAPEX se anualiza con el factor de recuperacion de capital (CRF = WACC / (1-(1+WACC)^-n)). "
-            "El costo de interconexion se prorratea entre el area del proyecto."
+            "Los costos (CAPEX anualizado, OPEX, interconexion, logistica, riesgo, oportunidad agro) "
+            "son FIJOS — no cambian con el PPA. Solo el ingreso = generacion × PPA varia con el slider."
         )
 
     st.divider()
@@ -2968,26 +3026,18 @@ def render_rentabilidad_tab(df_r: pd.DataFrame) -> None:
     # ── Análisis financiero temporal (DCF real) ───────────────────────────────
     st.markdown("### Análisis financiero real — flujo de caja año a año")
     st.caption(
-        "El modelo anterior reparte el CAPEX uniformemente con CRF (como una cuota fija de crédito). "
-        "Aquí se calcula el **flujo real**: el CAPEX se paga completo en el **Año 0**, "
-        "y los años siguientes solo tienen costos operativos. "
-        "Así se ve cuándo el proyecto recupera la inversión y cuál es la TIR real."
-    )
-
-    ppa_slider = st.slider(
-        "Ajusta el PPA — precio de venta de energía (COP/kWh)",
-        min_value=120, max_value=320, value=160, step=10,
-        help="El modelo base usa 160 COP/kWh (conservador). PPAs reales en Colombia 2024: 180–260 COP/kWh para contratos bilaterales solares.",
-        key="rent_ppa_slider",
+        "El CAPEX se paga completo en el **Año 0**. Los años siguientes tienen costos operativos. "
+        "Asi se ve cuando el proyecto recupera la inversion y cual es la TIR real. "
+        f"Usando PPA = **{ppa_slider} COP/kWh** del slider de arriba."
     )
 
     dcf = _calcular_dcf(row_sel, ppa=float(ppa_slider))
 
     d1, d2, d3, d4 = st.columns(4)
     d1.metric(
-        "Inversión inicial (Año 0)",
+        "Inversion inicial (Año 0)",
         f"{dcf['inversion_ha']/1e6:.1f} M COP/ha",
-        help="CAPEX paneles + línea de interconexión. Desembolso único al inicio.",
+        help="CAPEX paneles + linea de interconexion. Desembolso unico al inicio.",
     )
     d2.metric(
         "VPN (NPV)",
@@ -3002,20 +3052,20 @@ def render_rentabilidad_tab(df_r: pd.DataFrame) -> None:
         help="Tasa interna de retorno. Si TIR > WACC el proyecto crea valor.",
     )
     d4.metric(
-        "Payback (recuperación)",
+        "Payback (recuperacion)",
         f"Año {dcf['payback']}" if dcf["payback"] is not None else f"> {dcf['n']} años",
-        help="Año en que el flujo de caja acumulado cruza cero y el proyecto empieza a ganar.",
+        help="Año en que el flujo de caja acumulado cruza cero.",
     )
 
-    fig_dcf = _chart_flujo_caja(dcf, str(row_sel.get("municipio", "")), ppa_slider)
+    fig_dcf = _chart_flujo_caja(dcf, str(row_orig.get("municipio", "")), ppa_slider)
     st.plotly_chart(fig_dcf, use_container_width=True)
 
     if dcf["payback"] is not None:
         años_rentables = dcf["n"] - dcf["payback"]
         ganancia_post = sum(dcf["flujos"][dcf["payback"]:]) / 1e6
         st.success(
-            f"✅ Con PPA = **{ppa_slider} COP/kWh**, este municipio recupera la inversión en el **año {dcf['payback']}** "
-            f"y tiene **{años_rentables} años de ganancia pura** (sin pagar CAPEX). "
+            f"✅ Con PPA = **{ppa_slider} COP/kWh**, este municipio recupera la inversion en el **año {dcf['payback']}** "
+            f"y tiene **{años_rentables} años de ganancia pura**. "
             f"Ganancia total post-payback: **{ganancia_post:,.0f} M COP/ha**."
         )
     else:
