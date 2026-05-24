@@ -759,15 +759,29 @@ def chart_raw_variable(
 
 
 def render_ranking_tab(df: pd.DataFrame, top5: pd.DataFrame, numero1: pd.Series) -> None:
+    # top5 y numero1 ya vienen con score_fisico = PVOUT normalizado (recalculado en main())
+    pvout_raw = pd.to_numeric(df["pvout_kwh_kwp_day"], errors="coerce")
+    pvout_min_val = float(pvout_raw.min())
+    pvout_max_val = float(pvout_raw.max())
+
+    # ── Header + grafica ───────────────────────────────────────────────────────
     st.header("Top 5 municipios — Score total")
+    st.info(
+        f"🌞 **Score Fisico = PVOUT real Solargis por municipio**, normalizado 0-1 "
+        f"(rango nacional: {pvout_min_val:.3f} – {pvout_max_val:.3f} kWh/kWp/dia). "
+        f"Los demas scores (Electrico, Economico, Agropecuario, Riesgo) permanecen igual. "
+        f"Pesos: Fisico 30% · Electrico 25% · Economico 20% · Agropecuario 15% · Riesgo 10%."
+    )
     st.caption("Cada segmento muestra el aporte ponderado (score × peso) de cada dimension al score total.")
     fig_stack = chart_top5_stacked(top5)
     st.plotly_chart(fig_stack, use_container_width=True)
 
     st.divider()
     st.header(f"Desglose del #1: {numero1['municipio']} ({numero1['departamento']})")
+    pvout_n1 = float(pd.to_numeric(numero1.get("pvout_kwh_kwp_day", 0), errors="coerce") or 0)
     st.caption(
         f"Score total: **{float(numero1['v_i_multidimensional']):.4f}** · "
+        f"PVOUT real: **{pvout_n1:.3f} kWh/kWp/dia** ({pvout_n1*365:,.0f} kWh/kWp/año) · "
         f"Clasificacion: **{numero1.get('clasificacion_multidim', '—')}**"
     )
 
@@ -786,7 +800,11 @@ def render_ranking_tab(df: pd.DataFrame, top5: pd.DataFrame, numero1: pd.Series)
 
     with tab1:
         st.markdown("#### Score Fisico `(peso: 30%)`")
-        st.caption("Variables climaticas y de recursos solares que determinan el potencial energetico del municipio.")
+        st.caption(
+            f"PVOUT real Solargis normalizado min-max "
+            f"({pvout_min_val:.3f} kWh/kWp/dia → 0.0  |  {pvout_max_val:.3f} kWh/kWp/dia → 1.0). "
+            "Municipios con mayor irradiacion solar real obtienen score mas alto."
+        )
         st.dataframe(style_table(build_table(numero1, FISICO_VARS)), use_container_width=True, hide_index=True)
         st.markdown("#### Score Electrico `(peso: 25%)`")
         st.caption("Proximidad y capacidad de la infraestructura de red para evacuar la energia generada.")
@@ -3728,7 +3746,27 @@ def main() -> None:
             f"Fuentes: NASA Power · Solargis PVOUT · UPME · RUNAP · UPRA EVA · INVIAS · SUI · IRENA · NREL"
         )
 
-    top5 = df.head(5).reset_index(drop=True)
+    # ── Recalcular ranking con PVOUT real Solargis (una sola vez para todos los tabs) ──
+    # score_fisico original mezcla temperatura, viento, precipitacion y pendiente.
+    # Al reemplazarlo por PVOUT normalizado, los municipios de alta irradiacion
+    # (Guajira, Costa Caribe) obtienen el ranking que les corresponde energeticamente.
+    _pvout_raw  = pd.to_numeric(df["pvout_kwh_kwp_day"], errors="coerce")
+    _p_min, _p_max = _pvout_raw.min(), _pvout_raw.max()
+    _pvout_norm = (_pvout_raw - _p_min) / (_p_max - _p_min) if _p_max > _p_min else (_pvout_raw * 0 + 0.5)
+    df = df.copy()
+    df["score_fisico"] = _pvout_norm.fillna(0)
+    for _col in ["score_electrico", "score_economico", "score_agropecuario", "score_riesgo"]:
+        df[_col] = pd.to_numeric(df[_col], errors="coerce").fillna(0)
+    df["v_i_multidimensional"] = (
+        df["score_fisico"]       * 0.30 +
+        df["score_electrico"]    * 0.25 +
+        df["score_economico"]    * 0.20 +
+        df["score_agropecuario"] * 0.15 +
+        df["score_riesgo"]       * 0.10
+    )
+    df = df.sort_values("v_i_multidimensional", ascending=False).reset_index(drop=True)
+
+    top5    = df.head(5).reset_index(drop=True)
     numero1 = top5.iloc[0]
 
     tab_ranking, tab_raw, tab_agro, tab_fin, tab_rent, tab_comp, tab_glosario = st.tabs([
